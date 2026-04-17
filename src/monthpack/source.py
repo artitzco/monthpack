@@ -1,12 +1,14 @@
-"""Metadata loading and period-aware rule resolution."""
+"""Source loading and period-aware metadata resolution."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import field
 import json
 from pathlib import Path
 from string import Formatter
 from typing import TYPE_CHECKING
+from typing import Callable
 from typing import Any, Mapping
 
 if TYPE_CHECKING:
@@ -29,6 +31,7 @@ def _copy_mapping(mapping: Mapping[str, Any]) -> dict[str, Any]:
 DEFAULT_OUTPATH = (
     {
         "path": "{period.year}/{period}_{source}.bin",
+        "writer": "pickle",
     },
 )
 
@@ -49,26 +52,27 @@ class _Period:
         return str(self.value)
 
 
-@dataclass(frozen=True)
-class Metadata:
-    """Represents metadata for one source and resolves values for a period."""
+@dataclass
+class Source:
+    """Represents one source and resolves values for a period."""
 
     source: str
     outpath_data: tuple[dict[str, Any], ...]
-    entries_data: tuple[dict[str, Any], ...]
+    metadata_data: tuple[dict[str, Any], ...]
     root: Path | None = None
+    transforms: list[Callable[[dict[str, Any]], DataFrame]] = field(default_factory=list)
 
     @classmethod
-    def from_path(cls, path: str | Path) -> Metadata:
-        """Load metadata from a JSON file."""
-        metadata_path = Path(path)
-        with metadata_path.open("r", encoding="utf-8") as handle:
+    def from_path(cls, path: str | Path) -> Source:
+        """Load source configuration from a JSON file."""
+        source_path = Path(path)
+        with source_path.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
         if "outpath" not in payload:
             payload["outpath"] = [dict(item) for item in DEFAULT_OUTPATH]
-            with metadata_path.open("w", encoding="utf-8") as handle:
+            with source_path.open("w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=2)
-        return cls.from_dict(payload, root=metadata_path.parent)
+        return cls.from_dict(payload, root=source_path.parent)
 
     @classmethod
     def from_dict(
@@ -76,36 +80,43 @@ class Metadata:
         payload: Mapping[str, Any],
         *,
         root: str | Path | None = None,
-    ) -> Metadata:
-        """Build a metadata object from a mapping."""
+    ) -> Source:
+        """Build a source object from a mapping."""
         source = str(payload["source"])
         raw_outpath = payload.get("outpath", DEFAULT_OUTPATH)
         outpath_data = tuple(_copy_mapping(item) for item in raw_outpath)
-        raw_entries = payload.get("entries", [])
-        entries_data = tuple(_copy_mapping(entry) for entry in raw_entries)
+        raw_metadata = payload.get("metadata", [])
+        metadata_data = tuple(_copy_mapping(entry) for entry in raw_metadata)
         resolved_root = Path(root) if root is not None else None
         return cls(
             source=source,
             outpath_data=outpath_data,
-            entries_data=entries_data,
+            metadata_data=metadata_data,
             root=resolved_root,
         )
 
-    def entries(self, period: int | None = None) -> dict[str, Any]:
+    def metadata(self, period: int | None = None) -> dict[str, Any]:
         """Resolve metadata values for a specific period."""
-        resolved = self._entries_raw(period)
+        resolved = self._metadata_raw(period)
         resolved["outpath"] = self._render_outpath(period)
         return self._render_templates(resolved, period=period)
 
-    def save(self, dataframe: DataFrame, period: int, key: str = "outpath") -> Path:
-        """Save a dataframe using the output path resolved from metadata."""
-        metadata = self.entries(period)
-        outpath_item = self._outpath_item(metadata[key])
-        destination = Path(str(outpath_item["path"]))
-        if self.root is not None:
-            destination = self.root / "output" / destination
+    def set_transforms(
+        self,
+        transforms: list[Callable[[dict[str, Any]], DataFrame]],
+    ) -> None:
+        """Register output transforms by outpath position."""
+        self.transforms = list(transforms)
+
+    def save(self, period: int, outpath: int = 0) -> Path:
+        """Build and save data for a period using the selected outpath."""
+        metadata = self.metadata(period)
+        transform = self._transform(outpath)
+        dataframe = transform(metadata)
+        outpath_item = self._outpath_item(metadata["outpath"], outpath)
+        destination = self._output_path(outpath_item)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        writer = str(outpath_item.get("writer", "pickle"))
+        writer = str(outpath_item["writer"])
         if writer == "pandas":
             dataframe.to_feather(destination)
         elif writer == "pickle":
@@ -114,29 +125,29 @@ class Metadata:
             raise ValueError(f"Unsupported writer: {writer}")
         return destination
 
-    def read(self, period: int, key: str = "outpath") -> PandasDataFrame:
-        """Read a dataframe using the path resolved from metadata."""
+    def read(self, period: int, outpath: int = 0, reload: bool = False) -> PandasDataFrame:
+        """Read data for a period, building it first when needed."""
         import pandas as pd
 
-        metadata = self.entries(period)
-        outpath_item = self._outpath_item(metadata[key])
-        source_path = Path(str(outpath_item["path"]))
-        if self.root is not None:
-            source_path = self.root / "output" / source_path
-        writer = str(outpath_item.get("writer", "pickle"))
+        metadata = self.metadata(period)
+        outpath_item = self._outpath_item(metadata["outpath"], outpath)
+        source_path = self._output_path(outpath_item)
+        if reload or not source_path.exists():
+            self.save(period, outpath)
+        writer = str(outpath_item["writer"])
         if writer == "pandas":
             return pd.read_feather(source_path)
         if writer == "pickle":
             return pd.read_pickle(source_path)
         raise ValueError(f"Unsupported writer: {writer}")
 
-    def _entries_raw(self, period: int | None) -> dict[str, Any]:
-        base_entries = [entry for entry in self.entries_data if not _is_period_rule(entry)]
+    def _metadata_raw(self, period: int | None) -> dict[str, Any]:
+        base_entries = [entry for entry in self.metadata_data if not _is_period_rule(entry)]
         resolved_period = self._resolve_period(period)
         persistent_entries = sorted(
             (
                 entry
-                for entry in self.entries_data
+                for entry in self.metadata_data
                 if _is_period_rule(entry)
                 and not _is_temporary(entry)
                 and int(entry["period"]) <= resolved_period
@@ -145,7 +156,7 @@ class Metadata:
         )
         temporary_entries = [
             entry
-            for entry in self.entries_data
+            for entry in self.metadata_data
             if _is_period_rule(entry) and _is_temporary(entry) and int(entry["period"]) == resolved_period
         ]
 
@@ -160,7 +171,7 @@ class Metadata:
 
         periods = [
             int(entry["period"])
-            for entry in self.entries_data
+            for entry in self.metadata_data
             if _is_period_rule(entry) and not _is_temporary(entry)
         ]
         if periods:
@@ -180,10 +191,21 @@ class Metadata:
             for item in self.outpath_data
         ]
 
-    def _outpath_item(self, value: Any) -> Mapping[str, Any]:
-        if isinstance(value, list) and value:
-            return value[0]
+    def _outpath_item(self, value: Any, outpath: int) -> Mapping[str, Any]:
+        if isinstance(value, list) and 0 <= outpath < len(value):
+            return value[outpath]
         raise ValueError("outpath must contain at least one item")
+
+    def _output_path(self, outpath_item: Mapping[str, Any]) -> Path:
+        path = Path(str(outpath_item["path"]))
+        if self.root is not None:
+            path = self.root / "output" / path
+        return path
+
+    def _transform(self, outpath: int) -> Callable[[dict[str, Any]], DataFrame]:
+        if 0 <= outpath < len(self.transforms):
+            return self.transforms[outpath]
+        raise ValueError("transform is not defined for the requested outpath index")
 
     def _render_templates(self, values: Mapping[str, Any], *, period: int | None) -> dict[str, Any]:
         context = self._template_context(period)

@@ -3,9 +3,9 @@
 `monthpack` is a Python library for organizing data sources with monthly
 periodicity, such as bank statements, income statements, and similar records.
 
-The project is centered around source-local `metadata.json` files that define:
+The project is centered around source-local `source.json` files that define:
 
-- base entries without `period`
+- base metadata without `period`
 - persistent changes starting at a given `period`
 - temporary changes for one specific `period`
 - placeholders such as `{period}`, `{period.year}`, `{period.month}`, and `{source}`
@@ -24,8 +24,8 @@ monthpack/
 ## Example
 
 ```python
-from monthpack import Metadata
+from monthpack import Source
 
-metadata = Metadata.from_path("data/source/metadata.json")
-current = metadata.entries(202401)
+source = Source.from_path("data/source/source.json")
+current = source.metadata(202401)
 ```
