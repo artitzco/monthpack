@@ -27,5 +27,5 @@ monthpack/
 from monthpack import Source
 
 source = Source.from_path("data/source/source.json")
-current = source.metadata(202401)
+current = source.resolve_metadata(202401)
 ```

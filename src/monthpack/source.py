@@ -1,4 +1,4 @@
-"""Source loading and period-aware metadata resolution."""
+"""Source loading and period-aware metadata and storage resolution."""
 
 from __future__ import annotations
 
@@ -28,9 +28,9 @@ def _copy_mapping(mapping: Mapping[str, Any]) -> dict[str, Any]:
     return dict(mapping.items())
 
 
-DEFAULT_OUTPATH = (
+DEFAULT_STORAGE = (
     {
-        "path": "{period.year}/{period}_{source}.bin",
+        "outpath": "{period.year}/{period}_{source}.bin",
         "writer": "pickle",
     },
 )
@@ -57,9 +57,10 @@ class Source:
     """Represents one source and resolves values for a period."""
 
     source: str
-    outpath_data: tuple[dict[str, Any], ...]
-    metadata_data: tuple[dict[str, Any], ...]
-    root: Path | None = None
+    storage: tuple[dict[str, Any], ...]
+    metadata: tuple[dict[str, Any], ...]
+    input_root: Path | None = None
+    output_root: Path | None = None
     transforms: list[Callable[[dict[str, Any]], DataFrame]] = field(default_factory=list)
 
     @classmethod
@@ -68,55 +69,67 @@ class Source:
         source_path = Path(path)
         with source_path.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
-        if "outpath" not in payload:
-            payload["outpath"] = [dict(item) for item in DEFAULT_OUTPATH]
+        updated = False
+        if "storage" not in payload:
+            payload["storage"] = [dict(item) for item in DEFAULT_STORAGE]
+            updated = True
+        if "input_root" not in payload:
+            payload["input_root"] = "input"
+            updated = True
+        if "output_root" not in payload:
+            payload["output_root"] = "output"
+            updated = True
+        if updated:
             with source_path.open("w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=2)
-        return cls.from_dict(payload, root=source_path.parent)
+                json.dump(payload, handle, indent=4)
+        data_root = source_path.parent
+        if "path" in payload:
+            data_root = (source_path.parent / str(payload["path"])).resolve()
+        normalized_payload = dict(payload)
+        normalized_payload["input_root"] = str(data_root / str(payload.get("input_root", "input")))
+        normalized_payload["output_root"] = str(data_root / str(payload.get("output_root", "output")))
+        return cls.from_dict(normalized_payload)
 
     @classmethod
     def from_dict(
         cls,
         payload: Mapping[str, Any],
-        *,
-        root: str | Path | None = None,
     ) -> Source:
         """Build a source object from a mapping."""
         source = str(payload["source"])
-        raw_outpath = payload.get("outpath", DEFAULT_OUTPATH)
-        outpath_data = tuple(_copy_mapping(item) for item in raw_outpath)
+        raw_storage = payload.get("storage", DEFAULT_STORAGE)
+        storage_data = tuple(_copy_mapping(item) for item in raw_storage)
         raw_metadata = payload.get("metadata", [])
         metadata_data = tuple(_copy_mapping(entry) for entry in raw_metadata)
-        resolved_root = Path(root) if root is not None else None
         return cls(
             source=source,
-            outpath_data=outpath_data,
-            metadata_data=metadata_data,
-            root=resolved_root,
+            storage=storage_data,
+            metadata=metadata_data,
+            input_root=Path(str(payload["input_root"])) if "input_root" in payload else None,
+            output_root=Path(str(payload["output_root"])) if "output_root" in payload else None,
         )
 
-    def metadata(self, period: int | None = None) -> dict[str, Any]:
+    def resolve_metadata(self, period: int | None = None) -> dict[str, Any]:
         """Resolve metadata values for a specific period."""
         resolved = self._metadata_raw(period)
-        resolved["outpath"] = self._render_outpath(period)
         return self._render_templates(resolved, period=period)
 
     def set_transforms(
         self,
         transforms: list[Callable[[dict[str, Any]], DataFrame]],
     ) -> None:
-        """Register output transforms by outpath position."""
+        """Register transforms by storage position."""
         self.transforms = list(transforms)
 
-    def save(self, period: int, outpath: int = 0) -> Path:
-        """Build and save data for a period using the selected outpath."""
-        metadata = self.metadata(period)
-        transform = self._transform(outpath)
+    def save(self, period: int, storage: int = 0) -> Path:
+        """Build and save data for a period using the selected storage item."""
+        metadata = self.resolve_metadata(period)
+        transform = self._transform(storage)
         dataframe = transform(metadata)
-        outpath_item = self._outpath_item(metadata["outpath"], outpath)
-        destination = self._output_path(outpath_item)
+        storage_item = self.resolve_storage_item(period, storage)
+        destination = self._storage_path(storage_item)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        writer = str(outpath_item["writer"])
+        writer = str(storage_item["writer"])
         if writer == "pandas":
             dataframe.to_feather(destination)
         elif writer == "pickle":
@@ -125,44 +138,51 @@ class Source:
             raise ValueError(f"Unsupported writer: {writer}")
         return destination
 
-    def read(self, period: int, outpath: int = 0, reload: bool = False) -> PandasDataFrame:
+    def read(self, period: int, storage: int = 0, reload: bool = False) -> PandasDataFrame:
         """Read data for a period, building it first when needed."""
         import pandas as pd
 
-        metadata = self.metadata(period)
-        outpath_item = self._outpath_item(metadata["outpath"], outpath)
-        source_path = self._output_path(outpath_item)
+        storage_item = self.resolve_storage_item(period, storage)
+        source_path = self._storage_path(storage_item)
         if reload or not source_path.exists():
-            self.save(period, outpath)
-        writer = str(outpath_item["writer"])
+            self.save(period, storage)
+        writer = str(storage_item["writer"])
         if writer == "pandas":
             return pd.read_feather(source_path)
         if writer == "pickle":
             return pd.read_pickle(source_path)
         raise ValueError(f"Unsupported writer: {writer}")
 
+    def resolve_storage(self, period: int | None = None) -> list[dict[str, Any]]:
+        """Resolve all storage definitions for a specific period."""
+        return self._render_storage(period)
+
+    def resolve_storage_item(self, period: int | None = None, storage: int = 0) -> dict[str, Any]:
+        """Resolve one storage definition for a specific period."""
+        return dict(self._storage_item(self.resolve_storage(period), storage))
+
     def _metadata_raw(self, period: int | None) -> dict[str, Any]:
-        base_entries = [entry for entry in self.metadata_data if not _is_period_rule(entry)]
+        base_metadata = [entry for entry in self.metadata if not _is_period_rule(entry)]
         resolved_period = self._resolve_period(period)
-        persistent_entries = sorted(
+        persistent_metadata = sorted(
             (
                 entry
-                for entry in self.metadata_data
+                for entry in self.metadata
                 if _is_period_rule(entry)
                 and not _is_temporary(entry)
                 and int(entry["period"]) <= resolved_period
             ),
             key=lambda entry: int(entry["period"]),
         )
-        temporary_entries = [
+        temporary_metadata = [
             entry
-            for entry in self.metadata_data
+            for entry in self.metadata
             if _is_period_rule(entry) and _is_temporary(entry) and int(entry["period"]) == resolved_period
         ]
 
         resolved: dict[str, Any] = {}
-        for entry in [*base_entries, *persistent_entries, *temporary_entries]:
-            resolved.update(self._entry_payload(entry))
+        for entry in [*base_metadata, *persistent_metadata, *temporary_metadata]:
+            resolved.update(self._metadata_payload(entry))
         return resolved
 
     def _resolve_period(self, period: int | None) -> int:
@@ -171,41 +191,41 @@ class Source:
 
         periods = [
             int(entry["period"])
-            for entry in self.metadata_data
+            for entry in self.metadata
             if _is_period_rule(entry) and not _is_temporary(entry)
         ]
         if periods:
             return max(periods)
         return 0
 
-    def _entry_payload(self, entry: Mapping[str, Any]) -> dict[str, Any]:
+    def _metadata_payload(self, entry: Mapping[str, Any]) -> dict[str, Any]:
         return {
             key: value
             for key, value in entry.items()
             if key not in {"period", "temporary"}
         }
 
-    def _render_outpath(self, period: int | None) -> list[dict[str, Any]]:
+    def _render_storage(self, period: int | None) -> list[dict[str, Any]]:
         return [
             self._render_value(item, self._template_context(period))
-            for item in self.outpath_data
+            for item in self.storage
         ]
 
-    def _outpath_item(self, value: Any, outpath: int) -> Mapping[str, Any]:
-        if isinstance(value, list) and 0 <= outpath < len(value):
-            return value[outpath]
-        raise ValueError("outpath must contain at least one item")
+    def _storage_item(self, value: Any, storage: int) -> Mapping[str, Any]:
+        if isinstance(value, list) and 0 <= storage < len(value):
+            return value[storage]
+        raise ValueError("storage must contain at least one item")
 
-    def _output_path(self, outpath_item: Mapping[str, Any]) -> Path:
-        path = Path(str(outpath_item["path"]))
-        if self.root is not None:
-            path = self.root / "output" / path
+    def _storage_path(self, storage_item: Mapping[str, Any]) -> Path:
+        path = Path(str(storage_item["outpath"]))
+        if self.output_root is not None:
+            path = self.output_root / path
         return path
 
-    def _transform(self, outpath: int) -> Callable[[dict[str, Any]], DataFrame]:
-        if 0 <= outpath < len(self.transforms):
-            return self.transforms[outpath]
-        raise ValueError("transform is not defined for the requested outpath index")
+    def _transform(self, storage: int) -> Callable[[dict[str, Any]], DataFrame]:
+        if 0 <= storage < len(self.transforms):
+            return self.transforms[storage]
+        raise ValueError("transform is not defined for the requested storage index")
 
     def _render_templates(self, values: Mapping[str, Any], *, period: int | None) -> dict[str, Any]:
         context = self._template_context(period)
