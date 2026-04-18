@@ -109,7 +109,9 @@ class Source:
 
     def resolve_metadata(self, period: int | None = None, verbose: bool = True) -> dict[str, Any]:
         """Resolve metadata values for a specific period."""
+        resolved_period = self._resolve_period(period)
         resolved = self._metadata_raw(period)
+        resolved["period"] = resolved_period
         rendered = self._render_templates(resolved, period=period)
         return self._resolve_inpaths(rendered, verbose=verbose)
 
@@ -143,14 +145,25 @@ class Source:
         storage: int = 0,
         reload: bool = False,
         verbose: bool = True,
-    ) -> PandasDataFrame:
+    ) -> PandasDataFrame | None:
         """Read data for a period, building it first when needed."""
         import pandas as pd
 
         storage_item = self.resolve_storage_item(period, storage)
         source_path = self._storage_path(storage_item)
         if reload or not source_path.exists():
+            metadata = self.resolve_metadata(period, verbose=verbose)
+            missing_inpaths = self._missing_inpaths(metadata)
+            if missing_inpaths:
+                if str(storage_item.get("on_missing", "error")) == "none":
+                    return None
+                missing_keys = ", ".join(missing_inpaths)
+                raise FileNotFoundError(f"Missing input path for: {missing_keys}")
             self.save(period, storage, verbose=verbose)
+        if not source_path.exists():
+            if str(storage_item.get("on_missing", "error")) == "none":
+                return None
+            raise FileNotFoundError(source_path)
         writer = str(storage_item["writer"])
         if writer == "pandas":
             return pd.read_feather(source_path)
@@ -164,7 +177,7 @@ class Source:
         storage: int = 0,
         reload: bool = False,
         verbose: bool = True,
-    ) -> PandasDataFrame:
+    ) -> PandasDataFrame | None:
         """Load data for a period using the selected storage item."""
         return self.read(period, storage=storage, reload=reload, verbose=verbose)
 
@@ -232,7 +245,7 @@ class Source:
         raise ValueError("storage must contain at least one item")
 
     def _storage_path(self, storage_item: Mapping[str, Any]) -> Path:
-        path = Path(str(storage_item["outpath"]))
+        path = Path(str(storage_item["path"]))
         if self.output is not None:
             path = Path(str(self.output["output_dir"])) / path
         return path
@@ -244,18 +257,23 @@ class Source:
                 resolved[key] = self._resolve_inpath(key, value, verbose=verbose)
         return resolved
 
+    @staticmethod
+    def _missing_inpaths(metadata: Mapping[str, Any]) -> list[str]:
+        return [
+            key
+            for key, value in metadata.items()
+            if key.endswith("inpath") and value is None
+        ]
+
     def _resolve_inpath(self, key: str, pattern: str, *, verbose: bool) -> Path | None:
         search_dir = self._input_dir()
-        matches = sorted(search_dir.glob(pattern))
+        matches = list(search_dir.glob(pattern))
         if not matches:
             if verbose:
                 print(f"[monthpack] No matches found for {key}: {pattern}")
             return None
 
-        selected = max(
-            matches,
-            key=lambda path: (path.name, path.stat().st_mtime),
-        )
+        selected = max(matches, key=self._input_path_sort_key)
         if len(matches) > 1 and verbose:
             print(
                 f"[monthpack] Multiple matches found for {key}: {pattern}. "
@@ -267,6 +285,10 @@ class Source:
         if self.input is not None:
             return Path(str(self.input["input_dir"]))
         return Path()
+
+    @staticmethod
+    def _input_path_sort_key(path: Path) -> tuple[str, float]:
+        return (path.name, path.stat().st_mtime)
 
     @staticmethod
     def _resolve_io_config(config: Any, base_dir: Path | None, dir_key: str) -> dict[str, Any]:
