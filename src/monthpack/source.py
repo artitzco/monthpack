@@ -29,6 +29,34 @@ def _copy_mapping(mapping: Mapping[str, Any]) -> dict[str, Any]:
 
 
 @dataclass(frozen=True)
+class Metadata:
+    """Resolved metadata for one specific period."""
+
+    values: dict[str, Any]
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self.values[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+    def __getitem__(self, key: str) -> Any:
+        return self.values[key]
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.values.get(key, default)
+
+    def items(self):
+        return self.values.items()
+
+    def keys(self):
+        return self.values.keys()
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self.values.items())
+
+
+@dataclass(frozen=True)
 class _Period:
     value: int
 
@@ -51,10 +79,9 @@ class Source:
     source: str
     storage: tuple[dict[str, Any], ...]
     metadata: tuple[dict[str, Any], ...]
-    path: str | None = None
     input: dict[str, Any] | None = None
     output: dict[str, Any] | None = None
-    transforms: list[Callable[[dict[str, Any]], DataFrame]] = field(default_factory=list)
+    transforms: list[Callable[[Metadata], DataFrame]] = field(default_factory=list)
 
     @classmethod
     def from_path(cls, path: str | Path) -> Source:
@@ -77,18 +104,15 @@ class Source:
         storage_data = tuple(_copy_mapping(item) for item in raw_storage)
         raw_metadata = payload["metadata"]
         metadata_data = tuple(_copy_mapping(entry) for entry in raw_metadata)
-        path_value = str(payload["path"]) if "path" in payload else None
         source_file = Path(source_path) if source_path is not None else None
         base_path = source_file.parent if source_file is not None else None
-        base_dir = None
-        if path_value is not None:
-            path_candidate = Path(path_value)
+        base_dir = base_path
+        if "path" in payload:
+            path_candidate = Path(str(payload["path"]))
             if base_path is not None and not path_candidate.is_absolute():
                 base_dir = (base_path / path_candidate).resolve()
             else:
                 base_dir = path_candidate
-        elif base_path is not None:
-            base_dir = base_path
 
         input_config = None
         if "input" in payload:
@@ -102,22 +126,21 @@ class Source:
             source=source,
             storage=storage_data,
             metadata=metadata_data,
-            path=path_value,
             input=input_config,
             output=output_config,
         )
 
-    def resolve_metadata(self, period: int | None = None, verbose: bool = True) -> dict[str, Any]:
+    def resolve_metadata(self, period: int | None = None, verbose: bool = True) -> Metadata:
         """Resolve metadata values for a specific period."""
         resolved_period = self._resolve_period(period)
         resolved = self._metadata_raw(period)
         resolved["period"] = resolved_period
         rendered = self._render_templates(resolved, period=period)
-        return self._resolve_inpaths(rendered, verbose=verbose)
+        return Metadata(self._resolve_inpaths(rendered, verbose=verbose))
 
     def set_transforms(
         self,
-        transforms: list[Callable[[dict[str, Any]], DataFrame]],
+        transforms: list[Callable[[Metadata], DataFrame]],
     ) -> None:
         """Register transforms by storage position."""
         self.transforms = list(transforms)
@@ -258,7 +281,7 @@ class Source:
         return resolved
 
     @staticmethod
-    def _missing_inpaths(metadata: Mapping[str, Any]) -> list[str]:
+    def _missing_inpaths(metadata: Metadata) -> list[str]:
         return [
             key
             for key, value in metadata.items()
@@ -308,7 +331,7 @@ class Source:
             resolved[dir_key] = str(dir_value)
         return resolved
 
-    def _transform(self, storage: int) -> Callable[[dict[str, Any]], DataFrame]:
+    def _transform(self, storage: int) -> Callable[[Metadata], DataFrame]:
         if 0 <= storage < len(self.transforms):
             return self.transforms[storage]
         raise ValueError("transform is not defined for the requested storage index")
