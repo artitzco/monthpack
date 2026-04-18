@@ -28,14 +28,6 @@ def _copy_mapping(mapping: Mapping[str, Any]) -> dict[str, Any]:
     return dict(mapping.items())
 
 
-DEFAULT_STORAGE = (
-    {
-        "outpath": "{period.year}/{period}_{source}.bin",
-        "writer": "pickle",
-    },
-)
-
-
 @dataclass(frozen=True)
 class _Period:
     value: int
@@ -59,8 +51,9 @@ class Source:
     source: str
     storage: tuple[dict[str, Any], ...]
     metadata: tuple[dict[str, Any], ...]
-    input_root: Path | None = None
-    output_root: Path | None = None
+    path: str | None = None
+    input: dict[str, Any] | None = None
+    output: dict[str, Any] | None = None
     transforms: list[Callable[[dict[str, Any]], DataFrame]] = field(default_factory=list)
 
     @classmethod
@@ -69,50 +62,56 @@ class Source:
         source_path = Path(path)
         with source_path.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
-        updated = False
-        if "storage" not in payload:
-            payload["storage"] = [dict(item) for item in DEFAULT_STORAGE]
-            updated = True
-        if "input_root" not in payload:
-            payload["input_root"] = "input"
-            updated = True
-        if "output_root" not in payload:
-            payload["output_root"] = "output"
-            updated = True
-        if updated:
-            with source_path.open("w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=4)
-        data_root = source_path.parent
-        if "path" in payload:
-            data_root = (source_path.parent / str(payload["path"])).resolve()
-        normalized_payload = dict(payload)
-        normalized_payload["input_root"] = str(data_root / str(payload.get("input_root", "input")))
-        normalized_payload["output_root"] = str(data_root / str(payload.get("output_root", "output")))
-        return cls.from_dict(normalized_payload)
+        return cls.from_dict(payload, source_path=source_path)
 
     @classmethod
     def from_dict(
         cls,
         payload: Mapping[str, Any],
+        *,
+        source_path: str | Path | None = None,
     ) -> Source:
         """Build a source object from a mapping."""
         source = str(payload["source"])
-        raw_storage = payload.get("storage", DEFAULT_STORAGE)
+        raw_storage = payload["storage"]
         storage_data = tuple(_copy_mapping(item) for item in raw_storage)
-        raw_metadata = payload.get("metadata", [])
+        raw_metadata = payload["metadata"]
         metadata_data = tuple(_copy_mapping(entry) for entry in raw_metadata)
+        path_value = str(payload["path"]) if "path" in payload else None
+        source_file = Path(source_path) if source_path is not None else None
+        base_path = source_file.parent if source_file is not None else None
+        base_dir = None
+        if path_value is not None:
+            path_candidate = Path(path_value)
+            if base_path is not None and not path_candidate.is_absolute():
+                base_dir = (base_path / path_candidate).resolve()
+            else:
+                base_dir = path_candidate
+        elif base_path is not None:
+            base_dir = base_path
+
+        input_config = None
+        if "input" in payload:
+            input_config = cls._resolve_io_config(payload["input"], base_dir, "input_dir")
+
+        output_config = None
+        if "output" in payload:
+            output_config = cls._resolve_io_config(payload["output"], base_dir, "output_dir")
+
         return cls(
             source=source,
             storage=storage_data,
             metadata=metadata_data,
-            input_root=Path(str(payload["input_root"])) if "input_root" in payload else None,
-            output_root=Path(str(payload["output_root"])) if "output_root" in payload else None,
+            path=path_value,
+            input=input_config,
+            output=output_config,
         )
 
-    def resolve_metadata(self, period: int | None = None) -> dict[str, Any]:
+    def resolve_metadata(self, period: int | None = None, verbose: bool = True) -> dict[str, Any]:
         """Resolve metadata values for a specific period."""
         resolved = self._metadata_raw(period)
-        return self._render_templates(resolved, period=period)
+        rendered = self._render_templates(resolved, period=period)
+        return self._resolve_inpaths(rendered, verbose=verbose)
 
     def set_transforms(
         self,
@@ -121,9 +120,9 @@ class Source:
         """Register transforms by storage position."""
         self.transforms = list(transforms)
 
-    def save(self, period: int, storage: int = 0) -> Path:
+    def save(self, period: int, storage: int = 0, verbose: bool = True) -> Path:
         """Build and save data for a period using the selected storage item."""
-        metadata = self.resolve_metadata(period)
+        metadata = self.resolve_metadata(period, verbose=verbose)
         transform = self._transform(storage)
         dataframe = transform(metadata)
         storage_item = self.resolve_storage_item(period, storage)
@@ -138,20 +137,36 @@ class Source:
             raise ValueError(f"Unsupported writer: {writer}")
         return destination
 
-    def read(self, period: int, storage: int = 0, reload: bool = False) -> PandasDataFrame:
+    def read(
+        self,
+        period: int,
+        storage: int = 0,
+        reload: bool = False,
+        verbose: bool = True,
+    ) -> PandasDataFrame:
         """Read data for a period, building it first when needed."""
         import pandas as pd
 
         storage_item = self.resolve_storage_item(period, storage)
         source_path = self._storage_path(storage_item)
         if reload or not source_path.exists():
-            self.save(period, storage)
+            self.save(period, storage, verbose=verbose)
         writer = str(storage_item["writer"])
         if writer == "pandas":
             return pd.read_feather(source_path)
         if writer == "pickle":
             return pd.read_pickle(source_path)
         raise ValueError(f"Unsupported writer: {writer}")
+
+    def load(
+        self,
+        period: int,
+        storage: int = 0,
+        reload: bool = False,
+        verbose: bool = True,
+    ) -> PandasDataFrame:
+        """Load data for a period using the selected storage item."""
+        return self.read(period, storage=storage, reload=reload, verbose=verbose)
 
     def resolve_storage(self, period: int | None = None) -> list[dict[str, Any]]:
         """Resolve all storage definitions for a specific period."""
@@ -218,9 +233,58 @@ class Source:
 
     def _storage_path(self, storage_item: Mapping[str, Any]) -> Path:
         path = Path(str(storage_item["outpath"]))
-        if self.output_root is not None:
-            path = self.output_root / path
+        if self.output is not None:
+            path = Path(str(self.output["output_dir"])) / path
         return path
+
+    def _resolve_inpaths(self, metadata: Mapping[str, Any], *, verbose: bool) -> dict[str, Any]:
+        resolved = dict(metadata.items())
+        for key, value in metadata.items():
+            if key.endswith("inpath") and isinstance(value, str):
+                resolved[key] = self._resolve_inpath(key, value, verbose=verbose)
+        return resolved
+
+    def _resolve_inpath(self, key: str, pattern: str, *, verbose: bool) -> Path | None:
+        search_dir = self._input_dir()
+        matches = sorted(search_dir.glob(pattern))
+        if not matches:
+            if verbose:
+                print(f"[monthpack] No matches found for {key}: {pattern}")
+            return None
+
+        selected = max(
+            matches,
+            key=lambda path: (path.name, path.stat().st_mtime),
+        )
+        if len(matches) > 1 and verbose:
+            print(
+                f"[monthpack] Multiple matches found for {key}: {pattern}. "
+                f"Using {selected}."
+            )
+        return selected
+
+    def _input_dir(self) -> Path:
+        if self.input is not None:
+            return Path(str(self.input["input_dir"]))
+        return Path()
+
+    @staticmethod
+    def _resolve_io_config(config: Any, base_dir: Path | None, dir_key: str) -> dict[str, Any]:
+        if not isinstance(config, Mapping):
+            raise ValueError(f"{dir_key} configuration must be a mapping")
+        if dir_key not in config:
+            raise ValueError(f"{dir_key} configuration must define {dir_key}")
+
+        resolved = dict(config.items())
+        relative = bool(resolved.get("relative", False))
+        dir_value = Path(str(resolved[dir_key]))
+        if relative:
+            if base_dir is None:
+                raise ValueError(f"{dir_key} cannot be relative without a source path")
+            resolved[dir_key] = str((base_dir / dir_value).resolve())
+        else:
+            resolved[dir_key] = str(dir_value)
+        return resolved
 
     def _transform(self, storage: int) -> Callable[[dict[str, Any]], DataFrame]:
         if 0 <= storage < len(self.transforms):
