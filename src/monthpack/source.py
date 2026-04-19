@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass
 from dataclasses import field
 import json
@@ -32,7 +33,16 @@ def _copy_mapping(mapping: Mapping[str, Any]) -> dict[str, Any]:
 class Metadata:
     """Resolved metadata for one specific period."""
 
+    period: int
     values: dict[str, Any]
+
+    @property
+    def year(self) -> int:
+        return self.period // 100
+
+    @property
+    def month(self) -> int:
+        return self.period % 100
 
     def __getattr__(self, name: str) -> Any:
         try:
@@ -133,11 +143,20 @@ class Source:
 
     def resolve_metadata(self, period: int | None = None, verbose: bool = True) -> Metadata:
         """Resolve metadata values for a specific period."""
+        return self._resolve_metadata_values(period, verbose=verbose, include_temporary=True)
+
+    def _resolve_metadata_values(
+        self,
+        period: int | None,
+        *,
+        verbose: bool,
+        include_temporary: bool,
+    ) -> Metadata:
+        """Resolve metadata values for a specific period."""
         resolved_period = self._resolve_period(period)
-        resolved = self._metadata_raw(period)
-        resolved["period"] = resolved_period
-        rendered = self._render_templates(resolved, period=period)
-        return Metadata(self._resolve_inpaths(rendered, verbose=verbose))
+        resolved = self._metadata_raw(period, include_temporary=include_temporary)
+        rendered = self._render_templates(resolved, period=resolved_period)
+        return Metadata(resolved_period, self._resolve_inpaths(rendered, verbose=verbose))
 
     def set_transforms(
         self,
@@ -158,8 +177,16 @@ class Source:
         """Build and save data for a period using the selected storage item."""
         if self.user:
             raise PermissionError("save is not available in user mode")
-        metadata = self.resolve_metadata(period, verbose=verbose)
-        return self._save_one(period, storage, metadata)
+        storage_item = self.resolve_storage_item(period, storage)
+        effective_period = self._effective_period(period, storage_item)
+        if effective_period is None:
+            raise FileNotFoundError(f"No periodic anchor found for: {period}")
+        metadata = self._resolve_metadata_values(
+            effective_period,
+            verbose=verbose,
+            include_temporary=not self._is_storage_persistent(storage_item),
+        )
+        return self._save_one(effective_period, storage, metadata)
 
     def _save_one(self, period: int, storage: int, metadata: Metadata) -> Path:
         """Save data for one period using pre-resolved metadata."""
@@ -196,16 +223,20 @@ class Source:
                 verbose=verbose,
             )
 
-        values = [
-            self.read_one(
-                period,
-                storage=storage,
-                reload=reload,
-                skip_error=skip_error,
-                verbose=verbose,
-            )
-            for period in normalized_periods
-        ]
+        cache: dict[tuple[str, int | None], Any | None] = {}
+        values: list[Any | None] = []
+        for period in normalized_periods:
+            storage_item = self.resolve_storage_item(period, storage)
+            cache_key = self._read_cache_key(period, storage_item)
+            if cache_key not in cache:
+                cache[cache_key] = self.read_one(
+                    period,
+                    storage=storage,
+                    reload=reload,
+                    skip_error=skip_error,
+                    verbose=verbose,
+                )
+            values.append(cache[cache_key])
         storage_item = self.resolve_storage_item(normalized_periods[0], storage)
         return self._collect_reads(normalized_periods, values, storage_item)
 
@@ -222,18 +253,27 @@ class Source:
 
         try:
             storage_item = self.resolve_storage_item(period, storage)
-            source_path = self._storage_path(storage_item)
+            effective_period = self._effective_period(period, storage_item)
+            if effective_period is None:
+                raise FileNotFoundError(f"No periodic anchor found for: {period}")
+
+            effective_storage_item = self.resolve_storage_item(effective_period, storage)
+            source_path = self._storage_path(effective_storage_item)
             should_build = (reload or not source_path.exists()) and not self.user
             if should_build:
-                metadata = self.resolve_metadata(period, verbose=verbose)
+                metadata = self._resolve_metadata_values(
+                    effective_period,
+                    verbose=verbose,
+                    include_temporary=not self._is_storage_persistent(storage_item),
+                )
                 missing_inpaths = self._missing_inpaths(metadata)
                 if missing_inpaths:
                     missing_keys = ", ".join(missing_inpaths)
                     raise FileNotFoundError(f"Missing input path for: {missing_keys}")
-                self._save_one(period, storage, metadata)
+                self._save_one(effective_period, storage, metadata)
             if not source_path.exists():
                 raise FileNotFoundError(source_path)
-            writer = str(storage_item["writer"])
+            writer = str(effective_storage_item["writer"])
             if writer == "pandas":
                 return pd.read_feather(source_path)
             if writer == "pickle":
@@ -252,7 +292,7 @@ class Source:
         """Resolve one storage definition for a specific period."""
         return dict(self._storage_item(self.resolve_storage(period), storage))
 
-    def _metadata_raw(self, period: int | None) -> dict[str, Any]:
+    def _metadata_raw(self, period: int | None, *, include_temporary: bool) -> dict[str, Any]:
         base_metadata = [entry for entry in self.metadata if not _is_period_rule(entry)]
         resolved_period = self._resolve_period(period)
         persistent_metadata = sorted(
@@ -265,11 +305,13 @@ class Source:
             ),
             key=lambda entry: int(entry["period"]),
         )
-        temporary_metadata = [
-            entry
-            for entry in self.metadata
-            if _is_period_rule(entry) and _is_temporary(entry) and int(entry["period"]) == resolved_period
-        ]
+        temporary_metadata = []
+        if include_temporary:
+            temporary_metadata = [
+                entry
+                for entry in self.metadata
+                if _is_period_rule(entry) and _is_temporary(entry) and int(entry["period"]) == resolved_period
+            ]
 
         resolved: dict[str, Any] = {}
         for entry in [*base_metadata, *persistent_metadata, *temporary_metadata]:
@@ -289,6 +331,15 @@ class Source:
             return max(periods)
         return 0
 
+    def _periodic_periods(self) -> list[int]:
+        return sorted(
+            {
+                int(entry["period"])
+                for entry in self.metadata
+                if _is_period_rule(entry) and not _is_temporary(entry)
+            }
+        )
+
     def _metadata_payload(self, entry: Mapping[str, Any]) -> dict[str, Any]:
         return {
             key: value
@@ -301,6 +352,25 @@ class Source:
             self._render_value(item, self._template_context(period))
             for item in self.storage
         ]
+
+    @staticmethod
+    def _is_storage_persistent(storage_item: Mapping[str, Any]) -> bool:
+        return bool(storage_item.get("persistence", False))
+
+    def _effective_period(self, period: int, storage_item: Mapping[str, Any]) -> int | None:
+        if not self._is_storage_persistent(storage_item):
+            return period
+
+        periodic_periods = self._periodic_periods()
+        index = bisect_right(periodic_periods, period) - 1
+        if index < 0:
+            return None
+        return periodic_periods[index]
+
+    def _read_cache_key(self, period: int, storage_item: Mapping[str, Any]) -> tuple[str, int | None]:
+        if self._is_storage_persistent(storage_item):
+            return ("anchor", self._effective_period(period, storage_item))
+        return ("period", period)
 
     def _storage_item(self, value: Any, storage: int) -> Mapping[str, Any]:
         if isinstance(value, list) and 0 <= storage < len(value):
@@ -334,6 +404,7 @@ class Source:
         values: list[Any | None],
         storage_item: Mapping[str, Any],
     ) -> Any | None:
+        values = self._apply_period_column(periods, values, storage_item)
         collection = str(storage_item.get("collection", "list"))
         if collection == "list":
             return values
@@ -352,6 +423,29 @@ class Source:
             return None
         axis = int(storage_item.get("concat_axis", 0))
         return pd.concat(concat_values, axis=axis)
+
+    @staticmethod
+    def _apply_period_column(
+        periods: list[int],
+        values: list[Any | None],
+        storage_item: Mapping[str, Any],
+    ) -> list[Any | None]:
+        period_column = storage_item.get("period_column")
+        writer = str(storage_item.get("writer", ""))
+        if period_column is None or writer != "pandas":
+            return values
+
+        import pandas as pd
+
+        updated_values: list[Any | None] = []
+        for period, value in zip(periods, values, strict=False):
+            if value is None or not isinstance(value, pd.DataFrame):
+                updated_values.append(value)
+                continue
+            frame = value.copy()
+            frame[str(period_column)] = period
+            updated_values.append(frame)
+        return updated_values
 
     def _normalize_periods(self, periods: int | list[int] | tuple[int, int]) -> list[int]:
         if isinstance(periods, int):
