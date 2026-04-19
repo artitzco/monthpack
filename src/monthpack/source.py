@@ -81,6 +81,7 @@ class Source:
     metadata: tuple[dict[str, Any], ...]
     input: dict[str, Any] | None = None
     output: dict[str, Any] | None = None
+    user: bool = False
     transforms: list[Callable[[Metadata], DataFrame]] = field(default_factory=list)
 
     @classmethod
@@ -145,8 +146,18 @@ class Source:
         """Register transforms by storage position."""
         self.transforms = list(transforms)
 
+    def set_user(self) -> None:
+        """Switch to user mode."""
+        self.user = True
+
+    def set_admin(self) -> None:
+        """Switch to admin mode."""
+        self.user = False
+
     def save(self, period: int, storage: int = 0, verbose: bool = True) -> Path:
         """Build and save data for a period using the selected storage item."""
+        if self.user:
+            raise PermissionError("save is not available in user mode")
         metadata = self.resolve_metadata(period, verbose=verbose)
         return self._save_one(period, storage, metadata)
 
@@ -212,7 +223,8 @@ class Source:
         try:
             storage_item = self.resolve_storage_item(period, storage)
             source_path = self._storage_path(storage_item)
-            if reload or not source_path.exists():
+            should_build = (reload or not source_path.exists()) and not self.user
+            if should_build:
                 metadata = self.resolve_metadata(period, verbose=verbose)
                 missing_inpaths = self._missing_inpaths(metadata)
                 if missing_inpaths:
