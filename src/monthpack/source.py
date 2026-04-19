@@ -148,6 +148,10 @@ class Source:
     def save(self, period: int, storage: int = 0, verbose: bool = True) -> Path:
         """Build and save data for a period using the selected storage item."""
         metadata = self.resolve_metadata(period, verbose=verbose)
+        return self._save_one(period, storage, metadata)
+
+    def _save_one(self, period: int, storage: int, metadata: Metadata) -> Path:
+        """Save data for one period using pre-resolved metadata."""
         transform = self._transform(storage)
         dataframe = transform(metadata)
         storage_item = self.resolve_storage_item(period, storage)
@@ -164,45 +168,69 @@ class Source:
 
     def read(
         self,
-        period: int,
+        periods: int | list[int] | tuple[int, int],
         storage: int = 0,
         reload: bool = False,
+        skip_error: bool = True,
         verbose: bool = True,
-    ) -> PandasDataFrame | None:
-        """Read data for a period, building it first when needed."""
-        import pandas as pd
+    ) -> Any | None:
+        """Read one period or a collection of periods."""
+        normalized_periods = self._normalize_periods(periods)
+        if len(normalized_periods) == 1 and isinstance(periods, int):
+            return self.read_one(
+                normalized_periods[0],
+                storage=storage,
+                reload=reload,
+                skip_error=skip_error,
+                verbose=verbose,
+            )
 
-        storage_item = self.resolve_storage_item(period, storage)
-        source_path = self._storage_path(storage_item)
-        if reload or not source_path.exists():
-            metadata = self.resolve_metadata(period, verbose=verbose)
-            missing_inpaths = self._missing_inpaths(metadata)
-            if missing_inpaths:
-                if str(storage_item.get("on_missing", "error")) == "none":
-                    return None
-                missing_keys = ", ".join(missing_inpaths)
-                raise FileNotFoundError(f"Missing input path for: {missing_keys}")
-            self.save(period, storage, verbose=verbose)
-        if not source_path.exists():
-            if str(storage_item.get("on_missing", "error")) == "none":
-                return None
-            raise FileNotFoundError(source_path)
-        writer = str(storage_item["writer"])
-        if writer == "pandas":
-            return pd.read_feather(source_path)
-        if writer == "pickle":
-            return pd.read_pickle(source_path)
-        raise ValueError(f"Unsupported writer: {writer}")
+        values = [
+            self.read_one(
+                period,
+                storage=storage,
+                reload=reload,
+                skip_error=skip_error,
+                verbose=verbose,
+            )
+            for period in normalized_periods
+        ]
+        storage_item = self.resolve_storage_item(normalized_periods[0], storage)
+        return self._collect_reads(normalized_periods, values, storage_item)
 
-    def load(
+    def read_one(
         self,
         period: int,
         storage: int = 0,
         reload: bool = False,
+        skip_error: bool = True,
         verbose: bool = True,
-    ) -> PandasDataFrame | None:
-        """Load data for a period using the selected storage item."""
-        return self.read(period, storage=storage, reload=reload, verbose=verbose)
+    ) -> Any | None:
+        """Read data for one period, building it first when needed."""
+        import pandas as pd
+
+        try:
+            storage_item = self.resolve_storage_item(period, storage)
+            source_path = self._storage_path(storage_item)
+            if reload or not source_path.exists():
+                metadata = self.resolve_metadata(period, verbose=verbose)
+                missing_inpaths = self._missing_inpaths(metadata)
+                if missing_inpaths:
+                    missing_keys = ", ".join(missing_inpaths)
+                    raise FileNotFoundError(f"Missing input path for: {missing_keys}")
+                self._save_one(period, storage, metadata)
+            if not source_path.exists():
+                raise FileNotFoundError(source_path)
+            writer = str(storage_item["writer"])
+            if writer == "pandas":
+                return pd.read_feather(source_path)
+            if writer == "pickle":
+                return pd.read_pickle(source_path)
+            raise ValueError(f"Unsupported writer: {writer}")
+        except Exception:
+            if skip_error:
+                return None
+            raise
 
     def resolve_storage(self, period: int | None = None) -> list[dict[str, Any]]:
         """Resolve all storage definitions for a specific period."""
@@ -287,6 +315,60 @@ class Source:
             for key, value in metadata.items()
             if key.endswith("inpath") and value is None
         ]
+
+    def _collect_reads(
+        self,
+        periods: list[int],
+        values: list[Any | None],
+        storage_item: Mapping[str, Any],
+    ) -> Any | None:
+        collection = str(storage_item.get("collection", "list"))
+        if collection == "list":
+            return values
+        if collection == "dict":
+            return dict(zip(periods, values, strict=False))
+        if collection == "concat":
+            return self._concat_reads(values, storage_item)
+        raise ValueError(f"Unsupported collection: {collection}")
+
+    @staticmethod
+    def _concat_reads(values: list[Any | None], storage_item: Mapping[str, Any]) -> Any | None:
+        import pandas as pd
+
+        concat_values = [value for value in values if value is not None]
+        if not concat_values:
+            return None
+        axis = int(storage_item.get("concat_axis", 0))
+        return pd.concat(concat_values, axis=axis)
+
+    def _normalize_periods(self, periods: int | list[int] | tuple[int, int]) -> list[int]:
+        if isinstance(periods, int):
+            return [periods]
+        if isinstance(periods, tuple) and len(periods) == 2:
+            return self._period_range(periods[0], periods[1])
+        return list(periods)
+
+    def _period_range(self, start: int, end: int) -> list[int]:
+        periods = [start]
+        if start == end:
+            return periods
+        current = start
+        step = 1 if start < end else -1
+        while current != end:
+            current = self._advance_period(current, step)
+            periods.append(current)
+        return periods
+
+    @staticmethod
+    def _advance_period(period: int, step: int) -> int:
+        year = period // 100
+        month = period % 100
+        month += step
+        if month == 13:
+            return (year + 1) * 100 + 1
+        if month == 0:
+            return (year - 1) * 100 + 12
+        return year * 100 + month
 
     def _resolve_inpath(self, key: str, pattern: str, *, verbose: bool) -> Path | None:
         search_dir = self._input_dir()

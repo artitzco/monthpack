@@ -55,8 +55,7 @@ In general terms, a `source.config.json` file is structured like this:
   "storage": [
     {
       "path": "{period.year}/{period}_{source}.bin",
-      "writer": "pandas",
-      "on_missing": "none"
+      "writer": "pandas"
     }
   ],
   "input": {
@@ -74,7 +73,7 @@ Field overview:
 
 - `source`: logical source name used by the configuration and template rendering.
 - `metadata`: temporal metadata definitions. Entries without `period` are base values; entries with `period` override from that month onward; entries with `temporary: true` apply only for that exact month.
-- `storage`: processed-data storage definitions. Each item describes where a processed artifact is written, which writer should be used, and optionally what to do when the stored file is missing.
+- `storage`: processed-data storage definitions. Each item describes where a processed artifact is written and which writer should be used.
 - `input`: optional input directory configuration. If `relative` is `true`, `input_dir` is resolved relative to the JSON file.
 - `output`: optional output directory configuration. If `relative` is `true`, `output_dir` is resolved relative to the JSON file.
 
