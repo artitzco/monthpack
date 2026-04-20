@@ -30,7 +30,7 @@ def write_sample_config(
                 "period_label": "period",
                 "metadata": [
                     {
-                        "outpath": "{period.year}/{period}_dataframe.feather",
+                        "outpath": "{period.year}/{period}_{name}.bin",
                     }
                 ],
             },
@@ -42,7 +42,7 @@ def write_sample_config(
                 "period_label": "period",
                 "metadata": [
                     {
-                        "outpath": "{period.year}/{period}_series.feather",
+                        "outpath": "{period.year}/{period}_{name}.bin",
                     }
                 ],
             },
@@ -52,7 +52,7 @@ def write_sample_config(
                 "collection": "list",
                 "metadata": [
                     {
-                        "outpath": "{period.year}/{period}_pickle.pkl",
+                        "outpath": "{period.year}/{period}_{name}.pkl",
                     }
                 ],
             },

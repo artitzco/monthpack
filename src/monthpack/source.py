@@ -176,7 +176,7 @@ class Source:
             period,
             include_temporary=include_temporary,
         )
-        rendered = self._render_templates(resolved, period=resolved_period)
+        rendered = self._render_templates(resolved, period=resolved_period, storage=storage)
         values = (
             self._resolve_inpaths(rendered, verbose=verbose)
             if resolve_inpaths
@@ -397,13 +397,16 @@ class Source:
         }
 
     def _render_storage(self, period: int | None) -> list[dict[str, Any]]:
-        return [
-            {
-                key: (value if key == "metadata" else self._render_value(value, self._template_context(period)))
-                for key, value in item.items()
-            }
-            for item in self.storage
-        ]
+        rendered_items: list[dict[str, Any]] = []
+        for item in self.storage:
+            context = self._template_context(period, storage=item)
+            rendered_items.append(
+                {
+                    key: (value if key == "metadata" else self._render_value(value, context))
+                    for key, value in item.items()
+                }
+            )
+        return rendered_items
 
     @staticmethod
     def _is_storage_persistent(storage_item: Mapping[str, Any]) -> bool:
@@ -679,17 +682,36 @@ class Source:
         series.name = None if value_column == "__monthpack_series_value__" else value_column
         return series
 
-    def _render_templates(self, values: Mapping[str, Any], *, period: int | None) -> dict[str, Any]:
-        context = self._template_context(period)
+    def _render_templates(
+        self,
+        values: Mapping[str, Any],
+        *,
+        period: int | None,
+        storage: StorageRef | Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        context = self._template_context(period, storage=storage)
         return {
             key: self._render_value(value, context)
             for key, value in values.items()
         }
 
-    def _template_context(self, period: int | None) -> dict[str, Any]:
+    def _template_context(
+        self,
+        period: int | None,
+        storage: StorageRef | Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         context: dict[str, Any] = {}
         if period is not None:
             context["period"] = _Period(period)
+        storage_item: Mapping[str, Any] | None = None
+        if isinstance(storage, Mapping):
+            storage_item = storage
+        elif storage is not None:
+            storage_item = self._storage_item(self.storage, storage)
+        elif len(self.storage) == 1:
+            storage_item = self.storage[0]
+        if storage_item is not None and storage_item.get("name") is not None:
+            context["name"] = str(storage_item["name"])
         return context
 
     def _render_value(self, value: Any, context: Mapping[str, Any]) -> Any:
