@@ -206,7 +206,7 @@ class Source:
         if self.user:
             raise PermissionError("save is not available in user mode")
         storage_item = self.resolve_storage_item(period, storage)
-        effective_period = self._effective_period(period, storage_item)
+        effective_period = self._effective_period(period, storage_item, storage=storage)
         if period is not None and effective_period is None:
             raise FileNotFoundError(f"No periodic anchor found for: {period}")
         metadata = self._resolve_metadata_values(
@@ -256,7 +256,7 @@ class Source:
         values: list[Any | None] = []
         for period in normalized_periods:
             storage_item = self.resolve_storage_item(period, storage)
-            cache_key = self._read_cache_key(period, storage_item)
+            cache_key = self._read_cache_key(period, storage_item, storage=storage)
             if cache_key not in cache:
                 cache[cache_key] = self.read_one(
                     period,
@@ -280,46 +280,45 @@ class Source:
         """Read data for one period, building it first when needed."""
         import pandas as pd
 
-        try:
-            storage_item = self.resolve_storage_item(period, storage)
-            effective_period = self._effective_period(period, storage_item)
-            if period is not None and effective_period is None:
-                raise FileNotFoundError(f"No periodic anchor found for: {period}")
+        storage_item = self.resolve_storage_item(period, storage)
+        effective_period = self._effective_period(period, storage_item, storage=storage)
+        if period is not None and effective_period is None:
+            return self._missing_read(
+                f"No periodic anchor found for: {period}",
+                skip_error=skip_error,
+                verbose=verbose,
+            )
 
+        metadata = self._resolve_metadata_values(
+            effective_period,
+            verbose=verbose,
+            include_temporary=not self._is_storage_persistent(storage_item),
+            storage=storage,
+            resolve_inpaths=False,
+        )
+        effective_storage_item = self.resolve_storage_item(effective_period, storage)
+        source_path = self._storage_path(metadata.outpath)
+        should_build = (reload or not source_path.exists()) and not self.user
+        if should_build:
             metadata = self._resolve_metadata_values(
                 effective_period,
                 verbose=verbose,
                 include_temporary=not self._is_storage_persistent(storage_item),
                 storage=storage,
-                resolve_inpaths=False,
             )
-            effective_storage_item = self.resolve_storage_item(effective_period, storage)
-            source_path = self._storage_path(metadata.outpath)
-            should_build = (reload or not source_path.exists()) and not self.user
-            if should_build:
-                metadata = self._resolve_metadata_values(
-                    effective_period,
-                    verbose=verbose,
-                    include_temporary=not self._is_storage_persistent(storage_item),
-                    storage=storage,
-                )
-                missing_inpaths = self._missing_inpaths(metadata)
-                if missing_inpaths:
-                    missing_keys = ", ".join(missing_inpaths)
-                    raise FileNotFoundError(f"Missing input path for: {missing_keys}")
-                self._save_one(effective_period, storage, metadata)
-            if not source_path.exists():
-                raise FileNotFoundError(source_path)
-            writer = str(effective_storage_item["writer"])
-            if writer == "pandas":
-                return pd.read_feather(source_path)
-            if writer == "pickle":
-                return pd.read_pickle(source_path)
-            raise ValueError(f"Unsupported writer: {writer}")
-        except Exception:
-            if skip_error:
-                return None
-            raise
+            self._save_one(effective_period, storage, metadata)
+        if not source_path.exists():
+            return self._missing_read(
+                f"Processed file not found: {source_path}",
+                skip_error=skip_error,
+                verbose=verbose,
+            )
+        writer = str(effective_storage_item["writer"])
+        if writer == "pandas":
+            return pd.read_feather(source_path)
+        if writer == "pickle":
+            return pd.read_pickle(source_path)
+        raise ValueError(f"Unsupported writer: {writer}")
 
     def resolve_storage(self, period: int | None = None) -> list[dict[str, Any]]:
         """Resolve all storage definitions for a specific period."""
@@ -384,11 +383,11 @@ class Source:
             return max(periods)
         return 0
 
-    def _periodic_periods(self) -> list[int]:
+    def _periodic_periods(self, storage: int | None = None) -> list[int]:
         return sorted(
             {
                 int(entry["period"])
-                for entry in self.metadata
+                for entry in self._metadata_entries(storage)
                 if _is_period_rule(entry) and not _is_temporary(entry)
             }
         )
@@ -413,21 +412,33 @@ class Source:
     def _is_storage_persistent(storage_item: Mapping[str, Any]) -> bool:
         return bool(storage_item.get("persistence", False))
 
-    def _effective_period(self, period: int | None, storage_item: Mapping[str, Any]) -> int | None:
+    def _effective_period(
+        self,
+        period: int | None,
+        storage_item: Mapping[str, Any],
+        *,
+        storage: int | None = None,
+    ) -> int | None:
         if not self._is_storage_persistent(storage_item):
             return period
         if period is None:
             return None
 
-        periodic_periods = self._periodic_periods()
+        periodic_periods = self._periodic_periods(storage)
         index = bisect_right(periodic_periods, period) - 1
         if index < 0:
             return None
         return periodic_periods[index]
 
-    def _read_cache_key(self, period: int | None, storage_item: Mapping[str, Any]) -> tuple[str, int | None]:
+    def _read_cache_key(
+        self,
+        period: int | None,
+        storage_item: Mapping[str, Any],
+        *,
+        storage: int | None = None,
+    ) -> tuple[str, int | None]:
         if self._is_storage_persistent(storage_item):
-            return ("anchor", self._effective_period(period, storage_item))
+            return ("anchor", self._effective_period(period, storage_item, storage=storage))
         return ("period", period)
 
     def _storage_item(self, value: Any, storage: int) -> Mapping[str, Any]:
@@ -449,12 +460,12 @@ class Source:
         return resolved
 
     @staticmethod
-    def _missing_inpaths(metadata: Metadata) -> list[str]:
-        return [
-            key
-            for key, value in metadata.items()
-            if key.endswith("inpath") and value is None
-        ]
+    def _missing_read(message: str, *, skip_error: bool, verbose: bool) -> None:
+        if skip_error:
+            if verbose:
+                print(f"[monthpack] {message}")
+            return None
+        raise FileNotFoundError(message)
 
     def _collect_reads(
         self,
