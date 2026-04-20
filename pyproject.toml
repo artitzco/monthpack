@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "monthpack"
-version = "0.1.0"
+version = "0.1.1"
 description = "Python library for storing and working with monthly-period data."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
 authors = [
   { name = "artitzco" }
 ]
@@ -16,7 +16,6 @@ keywords = ["monthly", "finance", "statements", "accounting", "data"]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",

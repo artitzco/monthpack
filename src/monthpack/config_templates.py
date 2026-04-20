@@ -13,12 +13,12 @@ def write_sample_config(
     """Write a starter config with DataFrame, Series, and pickle storages."""
     payload: dict[str, Any] = {
         "input": {
-            "relative": True,
-            "directory": "input",
+            "root": ".",
+            "path": "input",
         },
         "output": {
-            "relative": True,
-            "directory": "output",
+            "root": ".",
+            "path": "output",
         },
         "storage": [
             {

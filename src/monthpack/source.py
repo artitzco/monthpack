@@ -96,24 +96,36 @@ class Source:
     input: dict[str, Any] | None = None
     output: dict[str, Any] | None = None
     user: bool = False
-    transforms: list[Callable[[Metadata], DataFrame]] = field(default_factory=list)
+    preprocessors: list[Callable[[Metadata], DataFrame]] = field(default_factory=list)
 
     @classmethod
-    def from_path(cls, path: str | Path) -> Source:
+    def from_path(
+        cls,
+        path: str | Path,
+        input: Mapping[str, Any] | None = None,
+        output: Mapping[str, Any] | None = None,
+    ) -> Source:
         """Load a source from a ``source.config.json`` file."""
         source_path = Path(path)
         with source_path.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
-        return cls.from_dict(payload, source_path=source_path)
+        return cls._from_payload(
+            payload,
+            source_path=source_path,
+            input=input,
+            output=output,
+        )
 
     @classmethod
-    def from_dict(
+    def _from_payload(
         cls,
         payload: Mapping[str, Any],
         *,
         source_path: str | Path | None = None,
+        input: Mapping[str, Any] | None = None,
+        output: Mapping[str, Any] | None = None,
     ) -> Source:
-        """Build a source from an already-loaded mapping."""
+        """Build a source from an already-loaded config payload."""
         raw_metadata = payload.get("metadata", [])
         metadata_data = tuple(_copy_mapping(entry) for entry in raw_metadata)
         raw_storage = payload["storage"]
@@ -123,22 +135,17 @@ class Source:
         )
         cls._validate_storage_names(storage_data)
         source_file = Path(source_path) if source_path is not None else None
-        base_path = source_file.parent if source_file is not None else None
-        base_dir = base_path
-        if "path" in payload:
-            path_candidate = Path(str(payload["path"]))
-            if base_path is not None and not path_candidate.is_absolute():
-                base_dir = (base_path / path_candidate).resolve()
-            else:
-                base_dir = path_candidate
+        config_root = source_file.parent if source_file is not None else None
 
         input_config = None
-        if "input" in payload:
-            input_config = cls._resolve_io_config(payload["input"], base_dir)
+        raw_input = cls._merge_config_override(payload.get("input"), input)
+        if raw_input is not None:
+            input_config = cls._resolve_path_config(raw_input, config_root)
 
         output_config = None
-        if "output" in payload:
-            output_config = cls._resolve_io_config(payload["output"], base_dir)
+        raw_output = cls._merge_config_override(payload.get("output"), output)
+        if raw_output is not None:
+            output_config = cls._resolve_path_config(raw_output, config_root)
 
         return cls(
             storage=storage_data,
@@ -184,12 +191,12 @@ class Source:
         )
         return Metadata(resolved_period, values)
 
-    def set_transforms(
+    def set_preprocessors(
         self,
-        transforms: list[Callable[[Metadata], DataFrame]],
+        preprocessors: list[Callable[[Metadata], DataFrame]],
     ) -> None:
-        """Register one transform per storage position."""
-        self.transforms = list(transforms)
+        """Register one preprocessor per storage position."""
+        self.preprocessors = list(preprocessors)
 
     def set_user(self) -> None:
         """Switch to read-only user mode."""
@@ -219,10 +226,10 @@ class Source:
         """Save one processed artifact using already-resolved metadata."""
         import pandas as pd
 
-        transform = self._transform(storage)
-        value = transform(metadata)
+        preprocessor = self._preprocessor(storage)
+        value = preprocessor(metadata)
         storage_item = self.resolve_storage_item(period, storage)
-        destination = self._storage_path(metadata.outpath)
+        destination = self._output_path(metadata.outpath)
         destination.parent.mkdir(parents=True, exist_ok=True)
         writer = str(storage_item["writer"])
         if writer == "pandas":
@@ -231,7 +238,7 @@ class Source:
                 value.to_feather(destination)
             elif pandas_type == "series":
                 if not isinstance(value, pd.Series):
-                    raise ValueError("pandas_type 'series' requires a pandas Series transform result")
+                    raise ValueError("pandas_type 'series' requires a pandas Series preprocessor result")
                 self._series_to_frame(value).to_feather(destination)
             else:
                 raise ValueError(f"Unsupported pandas_type: {pandas_type}")
@@ -305,7 +312,7 @@ class Source:
             resolve_inpaths=False,
         )
         effective_storage_item = self.resolve_storage_item(effective_period, storage)
-        source_path = self._storage_path(metadata.outpath)
+        source_path = self._output_path(metadata.outpath)
         should_build = (reload or not source_path.exists()) and not self.user
         if should_build:
             metadata = self._resolve_metadata_values(
@@ -453,10 +460,10 @@ class Source:
             raise ValueError(f"storage name is not defined: {storage}")
         raise ValueError("storage must contain at least one item")
 
-    def _storage_path(self, outpath: Any) -> Path:
+    def _output_path(self, outpath: Any) -> Path:
         path = Path(str(outpath))
         if self.output is not None:
-            path = Path(str(self.output["directory"])) / path
+            path = Path(str(self.output["path"])) / path
         return path
 
     def _resolve_inpaths(self, metadata: Mapping[str, Any], *, verbose: bool) -> dict[str, Any]:
@@ -560,7 +567,7 @@ class Source:
         return year * 100 + month
 
     def _resolve_inpath(self, key: str, pattern: str, *, verbose: bool) -> Path | None:
-        search_dir = self._input_dir()
+        search_dir = self._input_root_path()
         matches = list(search_dir.glob(pattern))
         if not matches:
             if verbose:
@@ -575,9 +582,9 @@ class Source:
             )
         return selected
 
-    def _input_dir(self) -> Path:
+    def _input_root_path(self) -> Path:
         if self.input is not None:
-            return Path(str(self.input["directory"]))
+            return Path(str(self.input["path"]))
         return Path()
 
     @staticmethod
@@ -585,24 +592,48 @@ class Source:
         return (path.name, path.stat().st_mtime)
 
     @staticmethod
-    def _resolve_io_config(config: Any, base_dir: Path | None) -> dict[str, Any]:
+    def _resolve_path_config(config: Any, config_root: Path | None) -> dict[str, Any]:
         if not isinstance(config, Mapping):
-            raise ValueError("directory configuration must be a mapping")
-        if "directory" not in config:
-            raise ValueError("directory configuration must define directory")
-        if "relative" not in config:
-            raise ValueError("directory configuration must define relative")
+            raise ValueError("path configuration must be a mapping")
 
         resolved = dict(config.items())
-        relative = bool(resolved["relative"])
-        dir_value = Path(str(resolved["directory"]))
-        if relative:
-            if base_dir is None:
-                raise ValueError("directory cannot be relative without a source path")
-            resolved["directory"] = str((base_dir / dir_value).resolve())
-        else:
-            resolved["directory"] = str(dir_value)
+        path_value = Path(str(resolved["path"]))
+        root_value = resolved["root"]
+        if root_value is None:
+            resolved["path"] = str(path_value)
+            return resolved
+
+        if str(root_value) == ".":
+            if config_root is None:
+                raise ValueError("root '.' requires a source path")
+            resolved["path"] = str((config_root / path_value).resolve())
+            return resolved
+
+        root_path = Path(str(root_value))
+        if not root_path.is_absolute():
+            if config_root is None:
+                raise ValueError("relative root requires a source path")
+            root_path = (config_root / root_path).resolve()
+        resolved["path"] = str((root_path / path_value).resolve())
         return resolved
+
+    @staticmethod
+    def _merge_config_override(
+        config: Any,
+        override: Mapping[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if config is None and override is None:
+            return None
+        merged: dict[str, Any] = {}
+        if config is not None:
+            if not isinstance(config, Mapping):
+                raise ValueError("path configuration must be a mapping")
+            merged.update(config.items())
+        if override is not None:
+            if not isinstance(override, Mapping):
+                raise ValueError("path override must be a mapping")
+            merged.update(override.items())
+        return merged
 
     @staticmethod
     def _prepare_storage_item(
@@ -635,11 +666,11 @@ class Source:
             duplicate_names = ", ".join(sorted(duplicates))
             raise ValueError(f"storage names must be unique: {duplicate_names}")
 
-    def _transform(self, storage: StorageRef) -> Callable[[Metadata], DataFrame]:
+    def _preprocessor(self, storage: StorageRef) -> Callable[[Metadata], DataFrame]:
         storage_index = self._storage_index(storage)
-        if 0 <= storage_index < len(self.transforms):
-            return self.transforms[storage_index]
-        raise ValueError("transform is not defined for the requested storage index")
+        if 0 <= storage_index < len(self.preprocessors):
+            return self.preprocessors[storage_index]
+        raise ValueError("preprocessor is not defined for the requested storage index")
 
     def _storage_index(self, storage: StorageRef) -> int:
         if isinstance(storage, int):

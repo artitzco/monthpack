@@ -38,6 +38,16 @@ print(metadata["reader"])
 data = source.read((202401, 202406), storage=0, skip_error=True)
 ```
 
+You can also override `input` or `output` when loading the config:
+
+```python
+source = Source.from_path(
+    "data/source/source.config.json",
+    input={"root": None, "path": "D:/raw/monthpack"},
+    output={"path": "processed_alt"},
+)
+```
+
 ## Config Templates
 
 `monthpack` also exposes a helper function for generating a starter
@@ -62,17 +72,18 @@ In general terms, a `source.config.json` file is structured like this:
 ```json
 {
     "input": {
-        "relative": true,
-        "directory": "input"
+        "root": ".",
+        "path": "input"
     },
     "output": {
-        "relative": true,
-        "directory": "output"
+        "root": ".",
+        "path": "output"
     },
     "storage": [
         {
             "name": "main",
             "writer": "pandas",
+            "pandas_type": "dataframe",
             "collection": "concat",
             "concat_axis": 0,
             "period_label": "period",
@@ -102,14 +113,21 @@ Field overview:
 
 - `metadata`: temporal metadata definitions. Entries without `period` are base values; entries with `period` override from that month onward; entries with `temporary: true` apply only for that exact month.
 - `storage`: processed-data storage definitions. Each item defines writer and collection behavior, and can also contain its own `metadata` list.
-- `input`: optional input directory configuration. If `relative` is `true`, `directory` is resolved relative to the JSON file.
-- `output`: optional output directory configuration. If `relative` is `true`, `directory` is resolved relative to the JSON file.
+- `input`: optional input path configuration. `root` defines the base used to interpret `path`.
+- `output`: optional output path configuration. `root` defines the base used to interpret `path`.
 
-At runtime, `Source.from_path(...)` reads this file, resolves relative
-directory references from `input` and `output`, and builds a `Source`
-instance from it.
+Path resolution rules:
 
-`Source.resolve_metadata(...)` returns a `Metadata` object. Resolved keys are available both as attributes and as dictionary-style accessors, so user transforms can use either `metadata.inpath` or `metadata["inpath"]`. The period itself is exposed as `metadata.period`, not as `metadata["period"]`.
+- `root = "."`: `path` is resolved relative to the folder containing the JSON file.
+- `root = null`: `path` is used as-is.
+- `root = "some/path"`: `path` is resolved relative to that explicit root.
+
+At runtime, `Source.from_path(...)` reads this file, resolves `input` and
+`output`, and builds a `Source` instance from it. The same method also accepts
+optional `input={...}` and `output={...}` overrides; only the keys you pass are
+changed, and those values take precedence over the JSON file.
+
+`Source.resolve_metadata(...)` returns a `Metadata` object. Resolved keys are available both as attributes and as dictionary-style accessors, so user preprocessors can use either `metadata.inpath` or `metadata["inpath"]`. The period itself is exposed as `metadata.period`, not as `metadata["period"]`.
 
 When `period=None`, `resolve_metadata(...)` returns only the base metadata,
 without applying any `periodic` or `temporary` entries.
@@ -132,7 +150,7 @@ configuration.
 
 `skip_error=True` returns `None` for missing-read cases such as a missing
 processed file or a missing persistence anchor. With `skip_error=False`,
-those cases raise `FileNotFoundError`. Programming errors inside transforms
+those cases raise `FileNotFoundError`. Programming errors inside preprocessors
 are not swallowed.
 
 ## Storage Options
