@@ -1,7 +1,7 @@
 # monthpack
 
-`monthpack` is a Python library for organizing data sources with monthly
-periodicity, such as bank statements, income statements, and similar records.
+`monthpack` is a Python library for organizing period-based data sources, such
+as bank statements, income statements, and similar records.
 
 The project is centered around local `source.config.json` files that define:
 
@@ -40,7 +40,8 @@ data = source.read((202401, 202406), storage=0, skip_error=True)
 
 ## Config Templates
 
-`monthpack` also exposes a helper function for generating a starter `source.config.json` file:
+`monthpack` also exposes a helper function for generating a starter
+`source.config.json` file:
 
 ```python
 from monthpack import write_sample_config
@@ -60,66 +61,66 @@ In general terms, a `source.config.json` file is structured like this:
 
 ```json
 {
-  "metadata": [
-    {
-      "inpath": "**/{period}_*.csv",
-      "reader": "csv"
+    "input": {
+        "relative": true,
+        "directory": "input"
     },
-    {
-      "period": 202507,
-      "inpath": "**/{period}_*.xlsx",
-      "reader": "excel"
-    }
-  ],
-  "storage": [
-    {
-      "name": "main",
-      "writer": "pandas",
-      "collection": "concat",
-      "concat_axis": 0,
-      "period_label": "period",
-      "persistence": true,
-      "metadata": [
+    "output": {
+        "relative": true,
+        "directory": "output"
+    },
+    "storage": [
         {
-          "outpath": "{period.year}/{period}.bin"
+            "name": "main",
+            "writer": "pandas",
+            "collection": "concat",
+            "concat_axis": 0,
+            "period_label": "period",
+            "persistence": true,
+            "metadata": [
+                {
+                    "outpath": "{period.year}/{period}_{name}.bin"
+                }
+            ]
         }
-      ]
-    }
-  ],
-  "input": {
-    "relative": true,
-    "directory": "input"
-  },
-  "output": {
-    "relative": true,
-    "directory": "output"
-  }
+    ],
+    "metadata": [
+        {
+            "inpath": "**/{period}_*.csv",
+            "reader": "csv"
+        },
+        {
+            "period": 202507,
+            "inpath": "**/{period}_*.xlsx",
+            "reader": "excel"
+        }
+    ]
 }
 ```
 
 Field overview:
 
 - `metadata`: temporal metadata definitions. Entries without `period` are base values; entries with `period` override from that month onward; entries with `temporary: true` apply only for that exact month.
-- `storage`: processed-data storage definitions. Each item defines writer and collection behavior, and can also contain its own `metadata` list. Storage metadata is merged on top of global metadata, so matching keys override the global values and new keys are added.
+- `storage`: processed-data storage definitions. Each item defines writer and collection behavior, and can also contain its own `metadata` list.
 - `input`: optional input directory configuration. If `relative` is `true`, `directory` is resolved relative to the JSON file.
 - `output`: optional output directory configuration. If `relative` is `true`, `directory` is resolved relative to the JSON file.
 
-At runtime, `Source.from_path(...)` reads this file, resolves relative directory references from `input` and `output`, and builds a `Source` instance from it.
-
-Global `metadata` is used as configuration input during construction. Each storage receives its own merged metadata view at load time, so the running `Source` object resolves metadata from storage-specific merged metadata instead of keeping a separate active global metadata layer.
+At runtime, `Source.from_path(...)` reads this file, resolves relative
+directory references from `input` and `output`, and builds a `Source`
+instance from it.
 
 `Source.resolve_metadata(...)` returns a `Metadata` object. Resolved keys are available both as attributes and as dictionary-style accessors, so user transforms can use either `metadata.inpath` or `metadata["inpath"]`. The period itself is exposed as `metadata.period`, not as `metadata["period"]`.
 
-When `period=None`, `resolve_metadata(...)` returns only the base metadata, without applying any `periodic` or `temporary` entries.
+When `period=None`, `resolve_metadata(...)` returns only the base metadata,
+without applying any `periodic` or `temporary` entries.
 
 Storage references can be passed either as:
 
 - an index, for example `storage=0`
 - a storage name, for example `storage="main"`
 
-When `name` is defined inside `storage`, it must be unique across the whole source configuration.
-
-If a source has more than one storage, `resolve_metadata(...)` requires a `storage` reference. Omitting it is only valid when the source has a single storage item.
+When `name` is defined inside `storage`, it must be unique across the
+configuration.
 
 ## Read Behavior
 
@@ -129,7 +130,10 @@ If a source has more than one storage, `resolve_metadata(...)` requires a `stora
 - `source.read((start, end), ...)` expands a continuous monthly range, ascending or descending according to the tuple order.
 - `source.read_one(period, ...)` is the single-period helper used internally.
 
-`skip_error=True` returns `None` only for the missing-read cases identified by the library itself, such as a missing processed file or a missing persistence anchor. With `skip_error=False`, those cases raise `FileNotFoundError`. Programming errors inside transforms are not swallowed.
+`skip_error=True` returns `None` for missing-read cases such as a missing
+processed file or a missing persistence anchor. With `skip_error=False`,
+those cases raise `FileNotFoundError`. Programming errors inside transforms
+are not swallowed.
 
 ## Storage Options
 
@@ -140,7 +144,9 @@ Within each `storage` item:
 - `pandas_type`: required when `writer = "pandas"`. Use `dataframe` or `series`.
 - `collection`: one of `list`, `dict`, or `concat`.
 - `concat_axis`: axis used when `collection = "concat"`.
-- `period_label`: when defined, adds the requested period to pandas outputs during collection reads. For `DataFrame`, it is used as a column name; for `Series`, it is used as the outer index level name.
+- `period_label`: when defined, adds the requested period to pandas outputs
+  during collection reads. For `DataFrame`, it is used as a column name; for
+  `Series`, it is used as the outer index level name.
 - `persistence`: when `true`, only `metadata` entries of type `periodic` act as anchors; later periods reuse the latest valid anchor.
 - `metadata`: storage-specific metadata. This is also where `outpath` should be declared.
 

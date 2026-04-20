@@ -25,6 +25,7 @@ def write_sample_config(
                 "name": "dataframe",
                 "writer": "pandas",
                 "pandas_type": "dataframe",
+                "persistence": False,
                 "collection": "concat",
                 "concat_axis": 0,
                 "period_label": "period",
@@ -38,6 +39,7 @@ def write_sample_config(
                 "name": "series",
                 "writer": "pandas",
                 "pandas_type": "series",
+                "persistence": False,
                 "collection": "concat",
                 "period_label": "period",
                 "metadata": [
@@ -49,6 +51,7 @@ def write_sample_config(
             {
                 "name": "pickle",
                 "writer": "pickle",
+                "persistence": False,
                 "collection": "list",
                 "metadata": [
                     {

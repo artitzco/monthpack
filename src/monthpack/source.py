@@ -410,7 +410,7 @@ class Source:
 
     @staticmethod
     def _is_storage_persistent(storage_item: Mapping[str, Any]) -> bool:
-        return bool(storage_item.get("persistence", False))
+        return bool(storage_item["persistence"])
 
     def _effective_period(
         self,
@@ -590,9 +590,11 @@ class Source:
             raise ValueError("directory configuration must be a mapping")
         if "directory" not in config:
             raise ValueError("directory configuration must define directory")
+        if "relative" not in config:
+            raise ValueError("directory configuration must define relative")
 
         resolved = dict(config.items())
-        relative = bool(resolved.get("relative", False))
+        relative = bool(resolved["relative"])
         dir_value = Path(str(resolved["directory"]))
         if relative:
             if base_dir is None:
@@ -607,8 +609,10 @@ class Source:
         item: Mapping[str, Any],
         metadata_data: tuple[dict[str, Any], ...],
     ) -> dict[str, Any]:
+        if "metadata" not in item:
+            raise KeyError("metadata")
         storage_item = _copy_mapping(item)
-        storage_metadata = tuple(_copy_mapping(entry) for entry in item.get("metadata", []))
+        storage_metadata = tuple(_copy_mapping(entry) for entry in item["metadata"])
         storage_item["metadata"] = tuple(
             _copy_mapping(entry)
             for entry in [*metadata_data, *storage_metadata]
