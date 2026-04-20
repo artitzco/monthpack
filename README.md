@@ -38,6 +38,22 @@ print(metadata["reader"])
 data = source.read((202401, 202406), storage=0, skip_error=True)
 ```
 
+## Config Templates
+
+`monthpack` also exposes a helper function for generating a starter `source.config.json` file:
+
+```python
+from monthpack import write_sample_config
+
+write_sample_config("data/sample/source.config.json")
+```
+
+This helper generates one example file with three storages already configured:
+
+- `dataframe`: `pandas` with `pandas_type = "dataframe"`
+- `series`: `pandas` with `pandas_type = "series"`
+- `pickle`: `pickle`
+
 ## source.config.json
 
 In general terms, a `source.config.json` file is structured like this:
@@ -58,10 +74,11 @@ In general terms, a `source.config.json` file is structured like this:
   ],
   "storage": [
     {
+      "name": "main",
       "writer": "pandas",
       "collection": "concat",
       "concat_axis": 0,
-      "period_column": "period",
+      "period_label": "period",
       "persistence": true,
       "metadata": [
         {
@@ -91,9 +108,20 @@ Field overview:
 
 At runtime, `Source.from_path(...)` reads this file, resolves relative directory references from `input` and `output`, and builds a `Source` instance from it.
 
+Global `metadata` is used as configuration input during construction. Each storage receives its own merged metadata view at load time, so the running `Source` object resolves metadata from storage-specific merged metadata instead of keeping a separate active global metadata layer.
+
 `Source.resolve_metadata(...)` returns a `Metadata` object. Resolved keys are available both as attributes and as dictionary-style accessors, so user transforms can use either `metadata.inpath` or `metadata["inpath"]`. The period itself is exposed as `metadata.period`, not as `metadata["period"]`.
 
 When `period=None`, `resolve_metadata(...)` returns only the base metadata, without applying any `periodic` or `temporary` entries.
+
+Storage references can be passed either as:
+
+- an index, for example `storage=0`
+- a storage name, for example `storage="main"`
+
+When `name` is defined inside `storage`, it must be unique across the whole source configuration.
+
+If a source has more than one storage, `resolve_metadata(...)` requires a `storage` reference. Omitting it is only valid when the source has a single storage item.
 
 ## Read Behavior
 
@@ -109,10 +137,12 @@ When `period=None`, `resolve_metadata(...)` returns only the base metadata, with
 
 Within each `storage` item:
 
+- `name`: optional unique identifier that lets the storage be referenced by name instead of only by index.
 - `writer`: currently supports `pandas` and `pickle`.
+- `pandas_type`: required when `writer = "pandas"`. Use `dataframe` or `series`.
 - `collection`: one of `list`, `dict`, or `concat`.
 - `concat_axis`: axis used when `collection = "concat"`.
-- `period_column`: when defined and the value is a pandas `DataFrame`, adds the requested period as a column during collection reads.
+- `period_label`: when defined, adds the requested period to pandas outputs during collection reads. For `DataFrame`, it is used as a column name; for `Series`, it is used as the outer index level name.
 - `persistence`: when `true`, only `metadata` entries of type `periodic` act as anchors; later periods reuse the latest valid anchor.
 - `metadata`: storage-specific metadata. This is also where `outpath` should be declared.
 

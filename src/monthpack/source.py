@@ -16,6 +16,8 @@ if TYPE_CHECKING:
     from pandas import DataFrame
     from pandas import DataFrame as PandasDataFrame
 
+StorageRef = int | str
+
 
 def _is_period_rule(rule: Mapping[str, Any]) -> bool:
     return "period" in rule
@@ -31,7 +33,7 @@ def _copy_mapping(mapping: Mapping[str, Any]) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class Metadata:
-    """Resolved metadata for one specific period."""
+    """Resolved metadata for one period or for the base atemporal case."""
 
     period: int | None
     values: dict[str, Any]
@@ -88,11 +90,10 @@ class _Period:
 
 @dataclass
 class Source:
-    """Represents one source and resolves values for a period."""
+    """Represents one configured source and orchestrates metadata, storage, and I/O."""
 
     source: str
     storage: tuple[dict[str, Any], ...]
-    metadata: tuple[dict[str, Any], ...]
     input: dict[str, Any] | None = None
     output: dict[str, Any] | None = None
     user: bool = False
@@ -100,7 +101,7 @@ class Source:
 
     @classmethod
     def from_path(cls, path: str | Path) -> Source:
-        """Load source configuration from a JSON file."""
+        """Load a source from a ``source.config.json`` file."""
         source_path = Path(path)
         with source_path.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
@@ -113,15 +114,16 @@ class Source:
         *,
         source_path: str | Path | None = None,
     ) -> Source:
-        """Build a source object from a mapping."""
+        """Build a source from an already-loaded mapping."""
         source = str(payload["source"])
-        raw_metadata = payload["metadata"]
+        raw_metadata = payload.get("metadata", [])
         metadata_data = tuple(_copy_mapping(entry) for entry in raw_metadata)
         raw_storage = payload["storage"]
         storage_data = tuple(
             cls._prepare_storage_item(item, metadata_data)
             for item in raw_storage
         )
+        cls._validate_storage_names(storage_data)
         source_file = Path(source_path) if source_path is not None else None
         base_path = source_file.parent if source_file is not None else None
         base_dir = base_path
@@ -143,7 +145,6 @@ class Source:
         return cls(
             source=source,
             storage=storage_data,
-            metadata=metadata_data,
             input=input_config,
             output=output_config,
         )
@@ -151,10 +152,10 @@ class Source:
     def resolve_metadata(
         self,
         period: int | None = None,
-        storage: int | None = None,
+        storage: StorageRef | None = None,
         verbose: bool = True,
     ) -> Metadata:
-        """Resolve metadata values for a specific period."""
+        """Resolve metadata for a period and optional storage override."""
         return self._resolve_metadata_values(
             period,
             verbose=verbose,
@@ -168,10 +169,10 @@ class Source:
         *,
         verbose: bool,
         include_temporary: bool,
-        storage: int | None,
+        storage: StorageRef | None,
         resolve_inpaths: bool = True,
     ) -> Metadata:
-        """Resolve metadata values for a specific period."""
+        """Internal metadata resolution with optional temporary and inpath control."""
         resolved_period = period if period is not None else None
         resolved = self._metadata_raw(
             self._metadata_entries(storage),
@@ -190,19 +191,19 @@ class Source:
         self,
         transforms: list[Callable[[Metadata], DataFrame]],
     ) -> None:
-        """Register transforms by storage position."""
+        """Register one transform per storage position."""
         self.transforms = list(transforms)
 
     def set_user(self) -> None:
-        """Switch to user mode."""
+        """Switch to read-only user mode."""
         self.user = True
 
     def set_admin(self) -> None:
-        """Switch to admin mode."""
+        """Switch back to admin mode."""
         self.user = False
 
-    def save(self, period: int | None, storage: int = 0, verbose: bool = True) -> Path:
-        """Build and save data for a period using the selected storage item."""
+    def save(self, period: int | None, storage: StorageRef = 0, verbose: bool = True) -> Path:
+        """Build and save processed data for one period and storage reference."""
         if self.user:
             raise PermissionError("save is not available in user mode")
         storage_item = self.resolve_storage_item(period, storage)
@@ -217,18 +218,28 @@ class Source:
         )
         return self._save_one(effective_period, storage, metadata)
 
-    def _save_one(self, period: int | None, storage: int, metadata: Metadata) -> Path:
-        """Save data for one period using pre-resolved metadata."""
+    def _save_one(self, period: int | None, storage: StorageRef, metadata: Metadata) -> Path:
+        """Save one processed artifact using already-resolved metadata."""
+        import pandas as pd
+
         transform = self._transform(storage)
-        dataframe = transform(metadata)
+        value = transform(metadata)
         storage_item = self.resolve_storage_item(period, storage)
         destination = self._storage_path(metadata.outpath)
         destination.parent.mkdir(parents=True, exist_ok=True)
         writer = str(storage_item["writer"])
         if writer == "pandas":
-            dataframe.to_feather(destination)
+            pandas_type = self._pandas_type(storage_item)
+            if pandas_type == "dataframe":
+                value.to_feather(destination)
+            elif pandas_type == "series":
+                if not isinstance(value, pd.Series):
+                    raise ValueError("pandas_type 'series' requires a pandas Series transform result")
+                self._series_to_frame(value).to_feather(destination)
+            else:
+                raise ValueError(f"Unsupported pandas_type: {pandas_type}")
         elif writer == "pickle":
-            dataframe.to_pickle(destination)
+            value.to_pickle(destination)
         else:
             raise ValueError(f"Unsupported writer: {writer}")
         return destination
@@ -236,12 +247,12 @@ class Source:
     def read(
         self,
         periods: int | None | list[int] | tuple[int, int],
-        storage: int = 0,
+        storage: StorageRef = 0,
         reload: bool = False,
         skip_error: bool = True,
         verbose: bool = True,
     ) -> Any | None:
-        """Read one period or a collection of periods."""
+        """Read one period or a collection of periods for a storage reference."""
         normalized_periods = self._normalize_periods(periods)
         if len(normalized_periods) == 1 and (isinstance(periods, int) or periods is None):
             return self.read_one(
@@ -272,12 +283,12 @@ class Source:
     def read_one(
         self,
         period: int | None,
-        storage: int = 0,
+        storage: StorageRef = 0,
         reload: bool = False,
         skip_error: bool = True,
         verbose: bool = True,
     ) -> Any | None:
-        """Read data for one period, building it first when needed."""
+        """Read one processed artifact and rebuild it first when needed."""
         import pandas as pd
 
         storage_item = self.resolve_storage_item(period, storage)
@@ -315,23 +326,26 @@ class Source:
             )
         writer = str(effective_storage_item["writer"])
         if writer == "pandas":
-            return pd.read_feather(source_path)
+            frame = pd.read_feather(source_path)
+            return self._pandas_value(frame, effective_storage_item)
         if writer == "pickle":
             return pd.read_pickle(source_path)
         raise ValueError(f"Unsupported writer: {writer}")
 
     def resolve_storage(self, period: int | None = None) -> list[dict[str, Any]]:
-        """Resolve all storage definitions for a specific period."""
+        """Resolve all storage definitions for one period."""
         return self._render_storage(period)
 
-    def resolve_storage_item(self, period: int | None = None, storage: int = 0) -> dict[str, Any]:
-        """Resolve one storage definition for a specific period."""
+    def resolve_storage_item(self, period: int | None = None, storage: StorageRef = 0) -> dict[str, Any]:
+        """Resolve one storage definition by index or name."""
         return dict(self._storage_item(self.resolve_storage(period), storage))
 
-    def _metadata_entries(self, storage: int | None) -> tuple[dict[str, Any], ...]:
+    def _metadata_entries(self, storage: StorageRef | None) -> tuple[dict[str, Any], ...]:
         if storage is None:
-            return self.metadata
-        return tuple(self.storage[storage].get("metadata", self.metadata))
+            if len(self.storage) == 1:
+                return tuple(self.storage[0].get("metadata", ()))
+            raise ValueError("storage must be specified when source has multiple storage items")
+        return tuple(self._storage_item(self.storage, storage).get("metadata", ()))
 
     def _metadata_raw(
         self,
@@ -346,14 +360,13 @@ class Source:
             for entry in base_metadata:
                 resolved.update(self._metadata_payload(entry))
             return resolved
-        resolved_period = self._resolve_period(period)
         persistent_metadata = sorted(
             (
                 entry
                 for entry in entries
                 if _is_period_rule(entry)
                 and not _is_temporary(entry)
-                and int(entry["period"]) <= resolved_period
+                and int(entry["period"]) <= period
             ),
             key=lambda entry: int(entry["period"]),
         )
@@ -362,7 +375,7 @@ class Source:
             temporary_metadata = [
                 entry
                 for entry in entries
-                if _is_period_rule(entry) and _is_temporary(entry) and int(entry["period"]) == resolved_period
+                if _is_period_rule(entry) and _is_temporary(entry) and int(entry["period"]) == period
             ]
 
         resolved: dict[str, Any] = {}
@@ -370,20 +383,7 @@ class Source:
             resolved.update(self._metadata_payload(entry))
         return resolved
 
-    def _resolve_period(self, period: int | None) -> int:
-        if period is not None:
-            return period
-
-        periods = [
-            int(entry["period"])
-            for entry in self.metadata
-            if _is_period_rule(entry) and not _is_temporary(entry)
-        ]
-        if periods:
-            return max(periods)
-        return 0
-
-    def _periodic_periods(self, storage: int | None = None) -> list[int]:
+    def _periodic_periods(self, storage: StorageRef | None = None) -> list[int]:
         return sorted(
             {
                 int(entry["period"])
@@ -417,7 +417,7 @@ class Source:
         period: int | None,
         storage_item: Mapping[str, Any],
         *,
-        storage: int | None = None,
+        storage: StorageRef | None = None,
     ) -> int | None:
         if not self._is_storage_persistent(storage_item):
             return period
@@ -435,15 +435,22 @@ class Source:
         period: int | None,
         storage_item: Mapping[str, Any],
         *,
-        storage: int | None = None,
+        storage: StorageRef | None = None,
     ) -> tuple[str, int | None]:
         if self._is_storage_persistent(storage_item):
             return ("anchor", self._effective_period(period, storage_item, storage=storage))
         return ("period", period)
 
-    def _storage_item(self, value: Any, storage: int) -> Mapping[str, Any]:
-        if isinstance(value, list) and 0 <= storage < len(value):
+    def _storage_item(self, value: Any, storage: StorageRef) -> Mapping[str, Any]:
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("storage must contain at least one item")
+        if isinstance(storage, int) and 0 <= storage < len(value):
             return value[storage]
+        if isinstance(storage, str):
+            for item in value:
+                if str(item.get("name")) == storage:
+                    return item
+            raise ValueError(f"storage name is not defined: {storage}")
         raise ValueError("storage must contain at least one item")
 
     def _storage_path(self, outpath: Any) -> Path:
@@ -473,7 +480,7 @@ class Source:
         values: list[Any | None],
         storage_item: Mapping[str, Any],
     ) -> Any | None:
-        values = self._apply_period_column(periods, values, storage_item)
+        values = self._apply_period_label(periods, values, storage_item)
         collection = str(storage_item.get("collection", "list"))
         if collection == "list":
             return values
@@ -494,14 +501,14 @@ class Source:
         return pd.concat(concat_values, axis=axis)
 
     @staticmethod
-    def _apply_period_column(
+    def _apply_period_label(
         periods: list[int],
         values: list[Any | None],
         storage_item: Mapping[str, Any],
     ) -> list[Any | None]:
-        period_column = storage_item.get("period_column")
+        period_label = storage_item.get("period_label")
         writer = str(storage_item.get("writer", ""))
-        if period_column is None or writer != "pandas":
+        if period_label is None or writer != "pandas":
             return values
 
         import pandas as pd
@@ -509,10 +516,15 @@ class Source:
         updated_values: list[Any | None] = []
         for period, value in zip(periods, values, strict=False):
             if value is None or not isinstance(value, pd.DataFrame):
-                updated_values.append(value)
+                if value is not None and isinstance(value, pd.Series):
+                    updated_values.append(
+                        pd.concat({period: value}, names=[str(period_label)])
+                    )
+                else:
+                    updated_values.append(value)
                 continue
             frame = value.copy()
-            frame[str(period_column)] = period
+            frame[str(period_label)] = period
             updated_values.append(frame)
         return updated_values
 
@@ -603,10 +615,72 @@ class Source:
         )
         return storage_item
 
-    def _transform(self, storage: int) -> Callable[[Metadata], DataFrame]:
-        if 0 <= storage < len(self.transforms):
-            return self.transforms[storage]
+    @staticmethod
+    def _validate_storage_names(storage_data: tuple[dict[str, Any], ...]) -> None:
+        names = [
+            str(item["name"])
+            for item in storage_data
+            if item.get("name") is not None
+        ]
+        duplicates = {
+            name
+            for name in names
+            if names.count(name) > 1
+        }
+        if duplicates:
+            duplicate_names = ", ".join(sorted(duplicates))
+            raise ValueError(f"storage names must be unique: {duplicate_names}")
+
+    def _transform(self, storage: StorageRef) -> Callable[[Metadata], DataFrame]:
+        storage_index = self._storage_index(storage)
+        if 0 <= storage_index < len(self.transforms):
+            return self.transforms[storage_index]
         raise ValueError("transform is not defined for the requested storage index")
+
+    def _storage_index(self, storage: StorageRef) -> int:
+        if isinstance(storage, int):
+            return storage
+        for index, item in enumerate(self.storage):
+            if str(item.get("name")) == storage:
+                return index
+        raise ValueError(f"storage name is not defined: {storage}")
+
+    @staticmethod
+    def _series_to_frame(value: PandasDataFrame | Any) -> PandasDataFrame:
+        import pandas as pd
+
+        if not isinstance(value, pd.Series):
+            raise ValueError("series serialization requires a pandas Series")
+        value_name = value.name if value.name is not None else "__monthpack_series_value__"
+        return value.rename(value_name).reset_index()
+
+    @staticmethod
+    def _pandas_value(frame: PandasDataFrame, storage_item: Mapping[str, Any]) -> Any:
+        pandas_type = Source._pandas_type(storage_item)
+        if pandas_type == "dataframe":
+            return frame
+        if pandas_type == "series":
+            return Source._frame_to_series(frame)
+        raise ValueError(f"Unsupported pandas_type: {pandas_type}")
+
+    @staticmethod
+    def _pandas_type(storage_item: Mapping[str, Any]) -> str:
+        return str(storage_item["pandas_type"])
+
+    @staticmethod
+    def _frame_to_series(frame: PandasDataFrame) -> Any:
+        if frame.shape[1] == 0:
+            raise ValueError("series deserialization requires at least one column")
+        index_columns = list(frame.columns[:-1])
+        value_column = frame.columns[-1]
+        if index_columns:
+            series = frame.set_index(index_columns).iloc[:, -1]
+            if len(index_columns) == 1:
+                series.index = series.index.get_level_values(0)
+        else:
+            series = frame.iloc[:, -1]
+        series.name = None if value_column == "__monthpack_series_value__" else value_column
+        return series
 
     def _render_templates(self, values: Mapping[str, Any], *, period: int | None) -> dict[str, Any]:
         context = self._template_context(period)
