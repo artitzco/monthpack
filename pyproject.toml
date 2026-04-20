@@ -22,6 +22,10 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Topic :: Office/Business :: Financial :: Accounting",
 ]
+dependencies = [
+  "pandas>=2.0",
+  "pyarrow>=14.0",
+]
 
 [project.optional-dependencies]
 dev = [
