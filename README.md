@@ -3,12 +3,12 @@
 `monthpack` is a Python library for organizing data sources with monthly
 periodicity, such as bank statements, income statements, and similar records.
 
-The project is centered around source-local `source.config.json` files that define:
+The project is centered around local `source.config.json` files that define:
 
 - base metadata without `period`
 - persistent changes starting at a given `period`
 - temporary changes for one specific `period`
-- placeholders such as `{period}`, `{period.year}`, `{period.month}`, and `{source}`
+- placeholders such as `{period}`, `{period.year}`, and `{period.month}`
 
 ## Current Layout
 
@@ -60,7 +60,6 @@ In general terms, a `source.config.json` file is structured like this:
 
 ```json
 {
-  "source": "bank_statements",
   "metadata": [
     {
       "inpath": "**/{period}_*.csv",
@@ -82,29 +81,28 @@ In general terms, a `source.config.json` file is structured like this:
       "persistence": true,
       "metadata": [
         {
-          "outpath": "{period.year}/{period}_{source}.bin"
+          "outpath": "{period.year}/{period}.bin"
         }
       ]
     }
   ],
   "input": {
     "relative": true,
-    "input_dir": "input"
+    "directory": "input"
   },
   "output": {
     "relative": true,
-    "output_dir": "output"
+    "directory": "output"
   }
 }
 ```
 
 Field overview:
 
-- `source`: logical source name used by the configuration and template rendering.
 - `metadata`: temporal metadata definitions. Entries without `period` are base values; entries with `period` override from that month onward; entries with `temporary: true` apply only for that exact month.
 - `storage`: processed-data storage definitions. Each item defines writer and collection behavior, and can also contain its own `metadata` list. Storage metadata is merged on top of global metadata, so matching keys override the global values and new keys are added.
-- `input`: optional input directory configuration. If `relative` is `true`, `input_dir` is resolved relative to the JSON file.
-- `output`: optional output directory configuration. If `relative` is `true`, `output_dir` is resolved relative to the JSON file.
+- `input`: optional input directory configuration. If `relative` is `true`, `directory` is resolved relative to the JSON file.
+- `output`: optional output directory configuration. If `relative` is `true`, `directory` is resolved relative to the JSON file.
 
 At runtime, `Source.from_path(...)` reads this file, resolves relative directory references from `input` and `output`, and builds a `Source` instance from it.
 

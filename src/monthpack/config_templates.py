@@ -9,18 +9,17 @@ from typing import Any
 
 def write_sample_config(
     path: str | Path,
-    *,
-    source: str = "sample_source",
 ) -> Path:
     """Write a starter config with DataFrame, Series, and pickle storages."""
     payload: dict[str, Any] = {
-        "source": source,
-        "metadata": [
-            {
-                "inpath": "**/{period}_*.csv",
-                "reader": "csv",
-            }
-        ],
+        "input": {
+            "relative": True,
+            "directory": "input",
+        },
+        "output": {
+            "relative": True,
+            "directory": "output",
+        },
         "storage": [
             {
                 "name": "dataframe",
@@ -31,7 +30,7 @@ def write_sample_config(
                 "period_label": "period",
                 "metadata": [
                     {
-                        "outpath": "{period.year}/{period}_{source}_dataframe.feather",
+                        "outpath": "{period.year}/{period}_dataframe.feather",
                     }
                 ],
             },
@@ -43,7 +42,7 @@ def write_sample_config(
                 "period_label": "period",
                 "metadata": [
                     {
-                        "outpath": "{period.year}/{period}_{source}_series.feather",
+                        "outpath": "{period.year}/{period}_series.feather",
                     }
                 ],
             },
@@ -53,19 +52,13 @@ def write_sample_config(
                 "collection": "list",
                 "metadata": [
                     {
-                        "outpath": "{period.year}/{period}_{source}_pickle.pkl",
+                        "outpath": "{period.year}/{period}_pickle.pkl",
                     }
                 ],
             },
         ],
-        "input": {
-            "relative": True,
-            "input_dir": "input",
-        },
-        "output": {
-            "relative": True,
-            "output_dir": "output",
-        },
+        "metadata": [
+        ],
     }
 
     destination = Path(path)

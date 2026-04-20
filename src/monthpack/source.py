@@ -92,7 +92,6 @@ class _Period:
 class Source:
     """Represents one configured source and orchestrates metadata, storage, and I/O."""
 
-    source: str
     storage: tuple[dict[str, Any], ...]
     input: dict[str, Any] | None = None
     output: dict[str, Any] | None = None
@@ -115,7 +114,6 @@ class Source:
         source_path: str | Path | None = None,
     ) -> Source:
         """Build a source from an already-loaded mapping."""
-        source = str(payload["source"])
         raw_metadata = payload.get("metadata", [])
         metadata_data = tuple(_copy_mapping(entry) for entry in raw_metadata)
         raw_storage = payload["storage"]
@@ -136,14 +134,13 @@ class Source:
 
         input_config = None
         if "input" in payload:
-            input_config = cls._resolve_io_config(payload["input"], base_dir, "input_dir")
+            input_config = cls._resolve_io_config(payload["input"], base_dir)
 
         output_config = None
         if "output" in payload:
-            output_config = cls._resolve_io_config(payload["output"], base_dir, "output_dir")
+            output_config = cls._resolve_io_config(payload["output"], base_dir)
 
         return cls(
-            source=source,
             storage=storage_data,
             input=input_config,
             output=output_config,
@@ -456,7 +453,7 @@ class Source:
     def _storage_path(self, outpath: Any) -> Path:
         path = Path(str(outpath))
         if self.output is not None:
-            path = Path(str(self.output["output_dir"])) / path
+            path = Path(str(self.output["directory"])) / path
         return path
 
     def _resolve_inpaths(self, metadata: Mapping[str, Any], *, verbose: bool) -> dict[str, Any]:
@@ -577,7 +574,7 @@ class Source:
 
     def _input_dir(self) -> Path:
         if self.input is not None:
-            return Path(str(self.input["input_dir"]))
+            return Path(str(self.input["directory"]))
         return Path()
 
     @staticmethod
@@ -585,21 +582,21 @@ class Source:
         return (path.name, path.stat().st_mtime)
 
     @staticmethod
-    def _resolve_io_config(config: Any, base_dir: Path | None, dir_key: str) -> dict[str, Any]:
+    def _resolve_io_config(config: Any, base_dir: Path | None) -> dict[str, Any]:
         if not isinstance(config, Mapping):
-            raise ValueError(f"{dir_key} configuration must be a mapping")
-        if dir_key not in config:
-            raise ValueError(f"{dir_key} configuration must define {dir_key}")
+            raise ValueError("directory configuration must be a mapping")
+        if "directory" not in config:
+            raise ValueError("directory configuration must define directory")
 
         resolved = dict(config.items())
         relative = bool(resolved.get("relative", False))
-        dir_value = Path(str(resolved[dir_key]))
+        dir_value = Path(str(resolved["directory"]))
         if relative:
             if base_dir is None:
-                raise ValueError(f"{dir_key} cannot be relative without a source path")
-            resolved[dir_key] = str((base_dir / dir_value).resolve())
+                raise ValueError("directory cannot be relative without a source path")
+            resolved["directory"] = str((base_dir / dir_value).resolve())
         else:
-            resolved[dir_key] = str(dir_value)
+            resolved["directory"] = str(dir_value)
         return resolved
 
     @staticmethod
@@ -690,9 +687,7 @@ class Source:
         }
 
     def _template_context(self, period: int | None) -> dict[str, Any]:
-        context = {
-            "source": self.source,
-        }
+        context: dict[str, Any] = {}
         if period is not None:
             context["period"] = _Period(period)
         return context
