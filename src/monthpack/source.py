@@ -95,7 +95,7 @@ class Source:
     storage: tuple[dict[str, Any], ...]
     input: dict[str, Any] | None = None
     output: dict[str, Any] | None = None
-    user: bool = False
+    admin_user: bool = True
     preprocessors: list[Callable[[Metadata], DataFrame]] = field(default_factory=list)
 
     @classmethod
@@ -104,28 +104,13 @@ class Source:
         path: str | Path,
         input: Mapping[str, Any] | None = None,
         output: Mapping[str, Any] | None = None,
+        admin_user: bool = True,
+        preprocessors: list[Callable[[Metadata], DataFrame]] | None = None,
     ) -> Source:
         """Load a source from a ``source.config.json`` file."""
         source_path = Path(path)
         with source_path.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
-        return cls._from_payload(
-            payload,
-            source_path=source_path,
-            input=input,
-            output=output,
-        )
-
-    @classmethod
-    def _from_payload(
-        cls,
-        payload: Mapping[str, Any],
-        *,
-        source_path: str | Path | None = None,
-        input: Mapping[str, Any] | None = None,
-        output: Mapping[str, Any] | None = None,
-    ) -> Source:
-        """Build a source from an already-loaded config payload."""
         raw_metadata = payload.get("metadata", [])
         metadata_data = tuple(_copy_mapping(entry) for entry in raw_metadata)
         raw_storage = payload["storage"]
@@ -134,8 +119,7 @@ class Source:
             for item in raw_storage
         )
         cls._validate_storage_names(storage_data)
-        source_file = Path(source_path) if source_path is not None else None
-        config_root = source_file.parent if source_file is not None else None
+        config_root = source_path.parent
 
         input_config = None
         raw_input = cls._merge_config_override(payload.get("input"), input)
@@ -151,6 +135,8 @@ class Source:
             storage=storage_data,
             input=input_config,
             output=output_config,
+            admin_user=admin_user,
+            preprocessors=list(preprocessors) if preprocessors is not None else [],
         )
 
     def resolve_metadata(
@@ -200,15 +186,15 @@ class Source:
 
     def set_user(self) -> None:
         """Switch to read-only user mode."""
-        self.user = True
+        self.admin_user = False
 
     def set_admin(self) -> None:
         """Switch back to admin mode."""
-        self.user = False
+        self.admin_user = True
 
     def save(self, period: int | None, storage: StorageRef = 0, verbose: bool = True) -> Path:
         """Build and save processed data for one period and storage reference."""
-        if self.user:
+        if not self.admin_user:
             raise PermissionError("save is not available in user mode")
         storage_item = self.resolve_storage_item(period, storage)
         effective_period = self._effective_period(period, storage_item, storage=storage)
@@ -233,7 +219,7 @@ class Source:
         destination.parent.mkdir(parents=True, exist_ok=True)
         writer = str(storage_item["writer"])
         if writer == "pandas":
-            pandas_type = self._pandas_type(storage_item)
+            pandas_type = str(storage_item["pandas_type"])
             if pandas_type == "dataframe":
                 value.to_feather(destination)
             elif pandas_type == "series":
@@ -313,7 +299,7 @@ class Source:
         )
         effective_storage_item = self.resolve_storage_item(effective_period, storage)
         source_path = self._output_path(metadata.outpath)
-        should_build = (reload or not source_path.exists()) and not self.user
+        should_build = (reload or not source_path.exists()) and self.admin_user
         if should_build:
             metadata = self._resolve_metadata_values(
                 effective_period,
@@ -342,14 +328,14 @@ class Source:
 
     def resolve_storage_item(self, period: int | None = None, storage: StorageRef = 0) -> dict[str, Any]:
         """Resolve one storage definition by index or name."""
-        return dict(self._storage_item(self.resolve_storage(period), storage))
+        return dict(self.resolve_storage(period)[self._resolve_storage_index(storage)])
 
     def _metadata_entries(self, storage: StorageRef | None) -> tuple[dict[str, Any], ...]:
         if storage is None:
             if len(self.storage) == 1:
                 return tuple(self.storage[0].get("metadata", ()))
             raise ValueError("storage must be specified when source has multiple storage items")
-        return tuple(self._storage_item(self.storage, storage).get("metadata", ()))
+        return tuple(self.storage[self._resolve_storage_index(storage)].get("metadata", ()))
 
     def _metadata_raw(
         self,
@@ -447,18 +433,6 @@ class Source:
         if self._is_storage_persistent(storage_item):
             return ("anchor", self._effective_period(period, storage_item, storage=storage))
         return ("period", period)
-
-    def _storage_item(self, value: Any, storage: StorageRef) -> Mapping[str, Any]:
-        if not isinstance(value, (list, tuple)):
-            raise ValueError("storage must contain at least one item")
-        if isinstance(storage, int) and 0 <= storage < len(value):
-            return value[storage]
-        if isinstance(storage, str):
-            for item in value:
-                if str(item.get("name")) == storage:
-                    return item
-            raise ValueError(f"storage name is not defined: {storage}")
-        raise ValueError("storage must contain at least one item")
 
     def _output_path(self, outpath: Any) -> Path:
         path = Path(str(outpath))
@@ -667,12 +641,12 @@ class Source:
             raise ValueError(f"storage names must be unique: {duplicate_names}")
 
     def _preprocessor(self, storage: StorageRef) -> Callable[[Metadata], DataFrame]:
-        storage_index = self._storage_index(storage)
+        storage_index = self._resolve_storage_index(storage)
         if 0 <= storage_index < len(self.preprocessors):
             return self.preprocessors[storage_index]
         raise ValueError("preprocessor is not defined for the requested storage index")
 
-    def _storage_index(self, storage: StorageRef) -> int:
+    def _resolve_storage_index(self, storage: StorageRef) -> int:
         if isinstance(storage, int):
             return storage
         for index, item in enumerate(self.storage):
@@ -691,16 +665,12 @@ class Source:
 
     @staticmethod
     def _pandas_value(frame: PandasDataFrame, storage_item: Mapping[str, Any]) -> Any:
-        pandas_type = Source._pandas_type(storage_item)
+        pandas_type = str(storage_item["pandas_type"])
         if pandas_type == "dataframe":
             return frame
         if pandas_type == "series":
             return Source._frame_to_series(frame)
         raise ValueError(f"Unsupported pandas_type: {pandas_type}")
-
-    @staticmethod
-    def _pandas_type(storage_item: Mapping[str, Any]) -> str:
-        return str(storage_item["pandas_type"])
 
     @staticmethod
     def _frame_to_series(frame: PandasDataFrame) -> Any:
@@ -742,7 +712,7 @@ class Source:
         if isinstance(storage, Mapping):
             storage_item = storage
         elif storage is not None:
-            storage_item = self._storage_item(self.storage, storage)
+            storage_item = self.storage[self._resolve_storage_index(storage)]
         elif len(self.storage) == 1:
             storage_item = self.storage[0]
         if storage_item is not None and storage_item.get("name") is not None:

@@ -38,6 +38,16 @@ print(metadata["reader"])
 data = source.read((202401, 202406), storage=0, skip_error=True)
 ```
 
+You can also initialize the source with `admin_user` and `preprocessors`:
+
+```python
+source = Source.from_path(
+    "data/source/source.config.json",
+    admin_user=True,
+    preprocessors=[preprocess_main, preprocess_backup],
+)
+```
+
 You can also override `input` or `output` when loading the config:
 
 ```python
@@ -125,7 +135,8 @@ Path resolution rules:
 At runtime, `Source.from_path(...)` reads this file, resolves `input` and
 `output`, and builds a `Source` instance from it. The same method also accepts
 optional `input={...}` and `output={...}` overrides; only the keys you pass are
-changed, and those values take precedence over the JSON file.
+changed, and those values take precedence over the JSON file. You can also pass
+`admin_user` and `preprocessors` directly to the same constructor.
 
 `Source.resolve_metadata(...)` returns a `Metadata` object. Resolved keys are available both as attributes and as dictionary-style accessors, so user preprocessors can use either `metadata.inpath` or `metadata["inpath"]`. The period itself is exposed as `metadata.period`, not as `metadata["period"]`.
 
