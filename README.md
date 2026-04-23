@@ -38,6 +38,46 @@ print(metadata["reader"])
 data = source.read((202401, 202406), storage=0, skip_error=True)
 ```
 
+## Metadata Module
+
+`monthpack` now also includes an experimental independent metadata module:
+
+```python
+from monthpack.metadata import Metadata
+
+metadata = Metadata.from_entries(
+    [
+        {"reader": "csv", "path": "raw"},
+        {"period": 202501, "reader": "excel"},
+        {"period": 202502, "temporary": True, "reader": "parquet"},
+    ]
+)
+
+base = metadata.resolve(None)
+current = metadata.resolve(202502)
+
+print(base.reader)      # csv
+print(current.reader)   # parquet
+print(current.year)     # 2025
+print(current.month)    # 2
+```
+
+This module is designed as a generic ordered metadata resolver:
+
+- `Metadata` stores the full sequence of metadata rules.
+- `MetadataRule` represents one base, periodic, or temporary rule.
+- `MetadataState` is the resolved state for one period.
+
+Current rule behavior:
+
+- entries without `period` are base values
+- entries with `period` apply from that period onward
+- entries with `temporary: true` apply only for the exact period
+
+For now, this module is independent from `Source` and `source.config.json`.
+It is documented here because it is part of the package, but it is not yet
+wired into the main source-loading workflow.
+
 You can also initialize the source with `admin_user` and `preprocessors`:
 
 ```python
@@ -51,10 +91,12 @@ source = Source.from_path(
 You can also override `input` or `output` when loading the config:
 
 ```python
+from pathlib import Path
+
 source = Source.from_path(
     "data/source/source.config.json",
-    input={"root": None, "path": "D:/raw/monthpack"},
-    output={"path": "processed_alt"},
+    input=Path("D:/raw/monthpack"),
+    output="D:/processed_alt",
 )
 ```
 
@@ -81,14 +123,8 @@ In general terms, a `source.config.json` file is structured like this:
 
 ```json
 {
-    "input": {
-        "root": ".",
-        "path": "input"
-    },
-    "output": {
-        "root": ".",
-        "path": "output"
-    },
+    "input": "|input",
+    "output": "|output",
     "storage": [
         {
             "name": "main",
@@ -123,19 +159,27 @@ Field overview:
 
 - `metadata`: temporal metadata definitions. Entries without `period` are base values; entries with `period` override from that month onward; entries with `temporary: true` apply only for that exact month.
 - `storage`: processed-data storage definitions. Each item defines writer and collection behavior, and can also contain its own `metadata` list.
-- `input`: optional input path configuration. `root` defines the base used to interpret `path`.
-- `output`: optional output path configuration. `root` defines the base used to interpret `path`.
+- `input`: optional input directory.
+- `output`: optional output directory.
 
 Path resolution rules:
 
-- `root = "."`: `path` is resolved relative to the folder containing the JSON file.
-- `root = null`: `path` is used as-is.
-- `root = "some/path"`: `path` is resolved relative to that explicit root.
+- `"|input"`: relative to the folder containing the JSON file.
+- `"input"`: relative to the current execution directory.
+- `"C:/data/input"`: absolute path.
 
 At runtime, `Source.from_path(...)` reads this file, resolves `input` and
 `output`, and builds a `Source` instance from it. The same method also accepts
-optional `input={...}` and `output={...}` overrides; only the keys you pass are
-changed, and those values take precedence over the JSON file. You can also pass
+optional `input` and `output` overrides. Those values can be:
+
+- a `str`
+- a `pathlib.Path`
+
+When `input` or `output` are passed to `from_path(...)`, they completely replace
+the corresponding block from the JSON file. Strings and `Path` objects are
+treated as direct paths; if they are relative, they are resolved from the
+current execution directory and normalized to absolute paths. Strings starting
+with `|` are resolved relative to the JSON file directory. You can also pass
 `admin_user` and `preprocessors` directly to the same constructor.
 
 `Source.resolve_metadata(...)` returns a `Metadata` object. Resolved keys are available both as attributes and as dictionary-style accessors, so user preprocessors can use either `metadata.inpath` or `metadata["inpath"]`. The period itself is exposed as `metadata.period`, not as `metadata["period"]`.
