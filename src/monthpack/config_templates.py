@@ -12,14 +12,8 @@ def write_sample_config(
 ) -> Path:
     """Write a starter config with DataFrame, Series, and pickle storages."""
     payload: dict[str, Any] = {
-        "input": {
-            "root": ".",
-            "path": "input",
-        },
-        "output": {
-            "root": ".",
-            "path": "output",
-        },
+        "input": "|input",
+        "output": "|output",
         "storage": [
             {
                 "name": "dataframe",

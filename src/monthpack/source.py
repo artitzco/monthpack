@@ -102,8 +102,8 @@ class Source:
     def from_path(
         cls,
         path: str | Path,
-        input: Mapping[str, Any] | None = None,
-        output: Mapping[str, Any] | None = None,
+        input: str | Path | None = None,
+        output: str | Path | None = None,
         admin_user: bool = True,
         preprocessors: list[Callable[[Metadata], DataFrame]] | None = None,
     ) -> Source:
@@ -122,14 +122,14 @@ class Source:
         config_root = source_path.parent
 
         input_config = None
-        raw_input = cls._merge_config_override(payload.get("input"), input)
+        raw_input = input if input is not None else payload.get("input")
         if raw_input is not None:
-            input_config = cls._resolve_path_config(raw_input, config_root)
+            input_config = cls._resolve_directory(raw_input, config_root)
 
         output_config = None
-        raw_output = cls._merge_config_override(payload.get("output"), output)
+        raw_output = output if output is not None else payload.get("output")
         if raw_output is not None:
-            output_config = cls._resolve_path_config(raw_output, config_root)
+            output_config = cls._resolve_directory(raw_output, config_root)
 
         return cls(
             storage=storage_data,
@@ -541,7 +541,7 @@ class Source:
         return year * 100 + month
 
     def _resolve_inpath(self, key: str, pattern: str, *, verbose: bool) -> Path | None:
-        search_dir = self._input_root_path()
+        search_dir = self._input_directory()
         matches = list(search_dir.glob(pattern))
         if not matches:
             if verbose:
@@ -556,7 +556,7 @@ class Source:
             )
         return selected
 
-    def _input_root_path(self) -> Path:
+    def _input_directory(self) -> Path:
         if self.input is not None:
             return Path(str(self.input["path"]))
         return Path()
@@ -566,48 +566,15 @@ class Source:
         return (path.name, path.stat().st_mtime)
 
     @staticmethod
-    def _resolve_path_config(config: Any, config_root: Path | None) -> dict[str, Any]:
-        if not isinstance(config, Mapping):
-            raise ValueError("path configuration must be a mapping")
-
-        resolved = dict(config.items())
-        path_value = Path(str(resolved["path"]))
-        root_value = resolved["root"]
-        if root_value is None:
-            resolved["path"] = str(path_value)
-            return resolved
-
-        if str(root_value) == ".":
-            if config_root is None:
-                raise ValueError("root '.' requires a source path")
-            resolved["path"] = str((config_root / path_value).resolve())
-            return resolved
-
-        root_path = Path(str(root_value))
-        if not root_path.is_absolute():
-            if config_root is None:
-                raise ValueError("relative root requires a source path")
-            root_path = (config_root / root_path).resolve()
-        resolved["path"] = str((root_path / path_value).resolve())
-        return resolved
-
-    @staticmethod
-    def _merge_config_override(
-        config: Any,
-        override: Mapping[str, Any] | None,
-    ) -> dict[str, Any] | None:
-        if config is None and override is None:
-            return None
-        merged: dict[str, Any] = {}
-        if config is not None:
-            if not isinstance(config, Mapping):
-                raise ValueError("path configuration must be a mapping")
-            merged.update(config.items())
-        if override is not None:
-            if not isinstance(override, Mapping):
-                raise ValueError("path override must be a mapping")
-            merged.update(override.items())
-        return merged
+    def _resolve_directory(value: Any, config_root: Path) -> dict[str, Any]:
+        if not isinstance(value, (str, Path)):
+            raise ValueError("input/output must be declared as a string or pathlib.Path")
+        raw_path = str(value)
+        if raw_path.startswith("|"):
+            resolved_path = (config_root / raw_path.removeprefix("|")).resolve()
+        else:
+            resolved_path = Path(raw_path).absolute()
+        return {"path": str(resolved_path)}
 
     @staticmethod
     def _prepare_storage_item(
