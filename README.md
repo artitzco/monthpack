@@ -78,6 +78,51 @@ For now, this module is independent from `Source` and `source.config.json`.
 It is documented here because it is part of the package, but it is not yet
 wired into the main source-loading workflow.
 
+## Period Module
+
+`monthpack` also includes an independent `Period` class for working with
+monthly periods represented as `YYYYMM`:
+
+```python
+from datetime import date
+
+from monthpack import Period
+
+period = Period(202504)
+
+print(period.year)              # 2025
+print(period.month)             # 4
+print(period + 1)               # 202505
+print(period - 3)               # 202501
+print(period - Period(202501))  # 3
+```
+
+`Period` also provides explicit constructors and a general coercion helper:
+
+```python
+from monthpack import Period
+
+print(Period.from_int(2601))          # 202601
+print(Period.from_string("26-01"))    # 202601
+print(Period.from_string("2026-01"))  # 202601
+print(Period.from_date(date(2026, 1, 15)))  # 202601
+
+print(Period.coerce(2601))         # 202601
+print(Period.coerce("2026-01"))    # 202601
+```
+
+Current `Period` behavior:
+
+- `Period(202504)` expects the canonical integer form `YYYYMM`.
+- `from_int(...)` accepts `YYYYMM` and short `YYMM`, where `YYMM` is interpreted as `20YYMM`.
+- `from_string(...)` accepts formats such as `YYYYMM`, `YYMM`, `YYYY-MM`, `YY-MM`, and full dates like `YYYY-MM-DD`.
+- `from_date(...)` accepts date-like objects with integer `year` and `month`, including `date`, `datetime`, and `pandas.Timestamp`.
+- `coerce(...)` normalizes common inputs into a `Period`.
+- `Period.range(start, end)` expands an inclusive monthly sequence in ascending or descending order.
+
+Like the metadata module, `Period` is currently documented as an independent
+building block. It is not yet wired into `Source` or the metadata resolver.
+
 You can also initialize the source with `admin_user` and `preprocessors`:
 
 ```python
