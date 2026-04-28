@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from pandas import DataFrame as PandasDataFrame
 
 StorageRef = int | str
+Postprocessor = Callable[..., Any]
 
 
 def _is_period_rule(rule: Mapping[str, Any]) -> bool:
@@ -97,6 +98,7 @@ class Source:
     output: Path | None = None
     admin_user: bool = True
     preprocessors: list[Callable[[Metadata], DataFrame]] = field(default_factory=list)
+    postprocessors: list[Postprocessor | None] = field(default_factory=list)
 
     @classmethod
     def from_path(
@@ -106,6 +108,7 @@ class Source:
         output: str | Path | None = None,
         admin_user: bool = True,
         preprocessors: list[Callable[[Metadata], DataFrame]] | None = None,
+        postprocessors: list[Postprocessor | None] | None = None,
     ) -> Source:
         """Load a source from a ``source.config.json`` file."""
         source_path = Path(path)
@@ -137,6 +140,7 @@ class Source:
             output=output_path,
             admin_user=admin_user,
             preprocessors=list(preprocessors) if preprocessors is not None else [],
+            postprocessors=list(postprocessors) if postprocessors is not None else [],
         )
 
     def resolve_metastate(
@@ -184,6 +188,13 @@ class Source:
     ) -> None:
         """Register one preprocessor per storage position."""
         self.preprocessors = list(preprocessors)
+
+    def set_postprocessors(
+        self,
+        postprocessors: list[Postprocessor | None],
+    ) -> None:
+        """Register one postprocessor per storage position."""
+        self.postprocessors = list(postprocessors)
 
     def set_user(self) -> None:
         """Switch to read-only user mode."""
@@ -242,6 +253,7 @@ class Source:
         reload: bool = False,
         skip_error: bool = True,
         verbose: bool = True,
+        postprocessor_kwargs: Mapping[str, Any] | None = None,
     ) -> Any | None:
         """Read one period or a collection of periods for a storage reference."""
         normalized_periods = self._normalize_periods(periods)
@@ -252,6 +264,7 @@ class Source:
                 reload=reload,
                 skip_error=skip_error,
                 verbose=verbose,
+                postprocessor_kwargs=postprocessor_kwargs,
             )
 
         cache: dict[tuple[str, int | None], Any | None] = {}
@@ -266,6 +279,7 @@ class Source:
                     reload=reload,
                     skip_error=skip_error,
                     verbose=verbose,
+                    postprocessor_kwargs=postprocessor_kwargs,
                 )
             values.append(cache[cache_key])
         storage_item = self.resolve_storage_item(normalized_periods[0], storage)
@@ -278,6 +292,7 @@ class Source:
         reload: bool = False,
         skip_error: bool = True,
         verbose: bool = True,
+        postprocessor_kwargs: Mapping[str, Any] | None = None,
     ) -> Any | None:
         """Read one processed artifact and rebuild it first when needed."""
         import pandas as pd
@@ -318,9 +333,21 @@ class Source:
         writer = str(effective_storage_item["writer"])
         if writer == "pandas":
             frame = pd.read_feather(source_path)
-            return self._pandas_value(frame, effective_storage_item)
+            value = self._pandas_value(frame, effective_storage_item)
+            return self._apply_postprocessor(
+                value,
+                metadata,
+                storage,
+                postprocessor_kwargs=postprocessor_kwargs,
+            )
         if writer == "pickle":
-            return pd.read_pickle(source_path)
+            value = pd.read_pickle(source_path)
+            return self._apply_postprocessor(
+                value,
+                metadata,
+                storage,
+                postprocessor_kwargs=postprocessor_kwargs,
+            )
         raise ValueError(f"Unsupported writer: {writer}")
 
     def resolve_storage(self, period: int | None = None) -> list[dict[str, Any]]:
@@ -437,6 +464,8 @@ class Source:
 
     def _output_path(self, outpath: Any) -> Path:
         path = Path(str(outpath))
+        if path.is_absolute():
+            return path
         if self.output is not None:
             path = self.output / path
         return path
@@ -620,6 +649,26 @@ class Source:
         if 0 <= storage_index < len(self.preprocessors):
             return self.preprocessors[storage_index]
         raise ValueError("preprocessor is not defined for the requested storage index")
+
+    def _postprocessor(self, storage: StorageRef) -> Postprocessor | None:
+        storage_index = self._resolve_storage_index(storage)
+        if 0 <= storage_index < len(self.postprocessors):
+            return self.postprocessors[storage_index]
+        return None
+
+    def _apply_postprocessor(
+        self,
+        value: Any,
+        metadata: Metadata,
+        storage: StorageRef,
+        *,
+        postprocessor_kwargs: Mapping[str, Any] | None,
+    ) -> Any:
+        postprocessor = self._postprocessor(storage)
+        if postprocessor is None:
+            return value
+        kwargs = dict(postprocessor_kwargs.items()) if postprocessor_kwargs is not None else {}
+        return postprocessor(value, metadata, **kwargs)
 
     def _resolve_storage_index(self, storage: StorageRef) -> int:
         if isinstance(storage, int):

@@ -123,13 +123,15 @@ Current `Period` behavior:
 Like the metadata module, `Period` is currently documented as an independent
 building block. It is not yet wired into `Source` or the metadata resolver.
 
-You can also initialize the source with `admin_user` and `preprocessors`:
+You can also initialize the source with `admin_user`, `preprocessors`, and
+`postprocessors`:
 
 ```python
 source = Source.from_path(
     "data/source/source.config.json",
     admin_user=True,
     preprocessors=[preprocess_main, preprocess_backup],
+    postprocessors=[postprocess_main, postprocess_backup],
 )
 ```
 
@@ -224,8 +226,10 @@ When `input` or `output` are passed to `from_path(...)`, they completely replace
 the corresponding block from the JSON file. Strings and `Path` objects are
 treated as direct paths; if they are relative, they are resolved from the
 current execution directory and normalized to absolute paths. Strings starting
-with `|` are resolved relative to the JSON file directory. You can also pass
-`admin_user` and `preprocessors` directly to the same constructor.
+with `|` are resolved relative to the JSON file directory. The resolved values
+are stored directly as `Path` objects on `source.input` and `source.output`.
+You can also pass `admin_user`, `preprocessors`, and `postprocessors` directly
+to the same constructor.
 
 `Source.resolve_metastate(...)` returns a `Metadata` object. Resolved keys are available both as attributes and as dictionary-style accessors, so user preprocessors can use either `metadata.inpath` or `metadata["inpath"]`. The period itself is exposed as `metadata.period`, not as `metadata["period"]`.
 
@@ -248,10 +252,27 @@ configuration.
 - `source.read((start, end), ...)` expands a continuous monthly range, ascending or descending according to the tuple order.
 - `source.read_one(period, ...)` is the single-period helper used internally.
 
+When a postprocessor is registered for the requested storage, it runs after
+the processed file has been read:
+
+```python
+def postprocess(data, metadata, multiplier=1):
+    return data * multiplier
+
+source.set_postprocessors([postprocess])
+data = source.read(202401, postprocessor_kwargs={"multiplier": 10})
+```
+
+Postprocessors receive the read value first, then the resolved metadata for the
+read artifact, followed by any `postprocessor_kwargs` passed to `read(...)` or
+`read_one(...)`. Additional postprocessor arguments are keyword-only at the
+`read(...)` API level. Postprocessors are applied in both admin mode and
+read-only user mode because they operate on already-processed files.
+
 `skip_error=True` returns `None` for missing-read cases such as a missing
 processed file or a missing persistence anchor. With `skip_error=False`,
 those cases raise `FileNotFoundError`. Programming errors inside preprocessors
-are not swallowed.
+or postprocessors are not swallowed.
 
 ## Storage Options
 
