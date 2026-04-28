@@ -1,0 +1,83 @@
+"""Helpers for writing starter ``source.config.json`` files."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+from typing import Mapping
+
+
+def write_dataframe_config(path: str | Path) -> Path:
+    """Write a starter config for a pandas DataFrame workflow."""
+    payload: dict[str, Any] = {
+        "name": "dataframe",
+        "input": "|input",
+        "output": "|output",
+        "writer": "pandas",
+        "pandas_type": "dataframe",
+        "persistence": False,
+        "collection": "concat",
+        "concat_axis": 0,
+        "period_label": "period",
+        "metadata": [
+            {
+                "inpath": "**/{period}_*.csv",
+                "reader": "csv",
+                "outpath": "{period.year}/{period}_{name}.bin",
+            }
+        ],
+    }
+    return _write_config(path, payload)
+
+
+def write_series_config(path: str | Path) -> Path:
+    """Write a starter config for a pandas Series workflow."""
+    payload: dict[str, Any] = {
+        "name": "series",
+        "input": "|input",
+        "output": "|output",
+        "writer": "pandas",
+        "pandas_type": "series",
+        "persistence": False,
+        "collection": "concat",
+        "period_label": "period",
+        "metadata": [
+            {
+                "inpath": "**/{period}_*.csv",
+                "reader": "csv",
+                "outpath": "{period.year}/{period}_{name}.bin",
+            }
+        ],
+    }
+    return _write_config(path, payload)
+
+
+def write_pickle_config(path: str | Path) -> Path:
+    """Write a starter config for a pickle workflow."""
+    payload: dict[str, Any] = {
+        "name": "pickle",
+        "input": "|input",
+        "output": "|output",
+        "writer": "pickle",
+        "persistence": False,
+        "collection": "list",
+        "metadata": [
+            {
+                "inpath": "**/{period}_*.csv",
+                "reader": "csv",
+                "outpath": "{period.year}/{period}_{name}.pkl",
+            }
+        ],
+    }
+    return _write_config(path, payload)
+
+
+def _write_config(path: str | Path, payload: Mapping[str, Any]) -> Path:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        json.dumps(payload, indent=4),
+        encoding="utf-8",
+    )
+    return destination
