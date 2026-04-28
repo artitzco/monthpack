@@ -93,8 +93,8 @@ class Source:
     """Represents one configured source and orchestrates metadata, storage, and I/O."""
 
     storage: tuple[dict[str, Any], ...]
-    input: dict[str, Any] | None = None
-    output: dict[str, Any] | None = None
+    input: Path | None = None
+    output: Path | None = None
     admin_user: bool = True
     preprocessors: list[Callable[[Metadata], DataFrame]] = field(default_factory=list)
 
@@ -121,20 +121,20 @@ class Source:
         cls._validate_storage_names(storage_data)
         config_root = source_path.parent
 
-        input_config = None
+        input_path = None
         raw_input = input if input is not None else payload.get("input")
         if raw_input is not None:
-            input_config = cls._resolve_directory(raw_input, config_root)
+            input_path = cls._resolve_directory(raw_input, config_root)
 
-        output_config = None
+        output_path = None
         raw_output = output if output is not None else payload.get("output")
         if raw_output is not None:
-            output_config = cls._resolve_directory(raw_output, config_root)
+            output_path = cls._resolve_directory(raw_output, config_root)
 
         return cls(
             storage=storage_data,
-            input=input_config,
-            output=output_config,
+            input=input_path,
+            output=output_path,
             admin_user=admin_user,
             preprocessors=list(preprocessors) if preprocessors is not None else [],
         )
@@ -438,7 +438,7 @@ class Source:
     def _output_path(self, outpath: Any) -> Path:
         path = Path(str(outpath))
         if self.output is not None:
-            path = Path(str(self.output["path"])) / path
+            path = self.output / path
         return path
 
     def _resolve_inpaths(self, metadata: Mapping[str, Any], *, verbose: bool) -> dict[str, Any]:
@@ -566,7 +566,7 @@ class Source:
 
     def _input_directory(self) -> Path:
         if self.input is not None:
-            return Path(str(self.input["path"]))
+            return self.input
         return Path()
 
     @staticmethod
@@ -574,7 +574,7 @@ class Source:
         return (path.name, path.stat().st_mtime)
 
     @staticmethod
-    def _resolve_directory(value: Any, config_root: Path) -> dict[str, Any]:
+    def _resolve_directory(value: Any, config_root: Path) -> Path:
         if not isinstance(value, (str, Path)):
             raise ValueError("input/output must be declared as a string or pathlib.Path")
         raw_path = str(value)
@@ -582,7 +582,7 @@ class Source:
             resolved_path = (config_root / raw_path.removeprefix("|")).resolve()
         else:
             resolved_path = Path(raw_path).absolute()
-        return {"path": str(resolved_path)}
+        return resolved_path
 
     @staticmethod
     def _prepare_storage_item(
