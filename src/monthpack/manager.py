@@ -51,11 +51,12 @@ class SourceManager:
     def read(
         self,
         identifier: str | int,
-        periods,
+        periods=None,
         reload: bool = False,
         skip_error: bool = True,
         verbose: bool = True,
         postprocessor_kwargs=None,
+        **kwargs: Any,
     ):
         """Proxy source reads by identifier."""
         source = self.get_source(identifier)
@@ -65,6 +66,7 @@ class SourceManager:
             skip_error=skip_error,
             verbose=verbose,
             postprocessor_kwargs=postprocessor_kwargs,
+            **kwargs,
         )
 
     def list_sources(self) -> list[dict[str, Any]]:
@@ -76,6 +78,16 @@ class SourceManager:
 
     def __len__(self) -> int:
         return len(self._sources)
+
+    def __str__(self) -> str:
+        source_names = [
+            source.name if source.name is not None else "<unnamed>"
+            for source in self._sources
+        ]
+        return f"SourceManager(total_sources={len(self)}, names={source_names})"
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(sources={self.list_sources()!r})"
 
     def __getitem__(self, identifier: str | int) -> Source:
         return self.get_source(identifier)

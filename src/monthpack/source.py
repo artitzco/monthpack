@@ -253,11 +253,12 @@ class Source:
 
     def read(
         self,
-        periods: int | None | list[int] | tuple[int, int],
+        periods: int | None | list[int] | tuple[int, int] = None,
         reload: bool = False,
         skip_error: bool = True,
         verbose: bool = True,
         postprocessor_kwargs: Mapping[str, Any] | None = None,
+        **kwargs: Any,
     ) -> Any | None:
         """Read one period or a collection of periods."""
         normalized_periods = self._normalize_periods(periods)
@@ -268,6 +269,7 @@ class Source:
                 skip_error=skip_error,
                 verbose=verbose,
                 postprocessor_kwargs=postprocessor_kwargs,
+                **kwargs,
             )
 
         cache: dict[tuple[str, int | None], Any | None] = {}
@@ -281,6 +283,7 @@ class Source:
                     skip_error=skip_error,
                     verbose=verbose,
                     postprocessor_kwargs=postprocessor_kwargs,
+                    **kwargs,
                 )
             values.append(cache[cache_key])
 
@@ -293,6 +296,7 @@ class Source:
         skip_error: bool = True,
         verbose: bool = True,
         postprocessor_kwargs: Mapping[str, Any] | None = None,
+        **kwargs: Any,
     ) -> Any | None:
         """Read one processed artifact and rebuild it first when needed."""
         import pandas as pd
@@ -334,16 +338,31 @@ class Source:
             return self._apply_postprocessor(
                 value,
                 metadata,
-                postprocessor_kwargs=postprocessor_kwargs,
+                postprocessor_kwargs=self._merge_postprocessor_kwargs(
+                    postprocessor_kwargs,
+                    kwargs,
+                ),
             )
         if self.writer == "pickle":
             value = pd.read_pickle(source_path)
             return self._apply_postprocessor(
                 value,
                 metadata,
-                postprocessor_kwargs=postprocessor_kwargs,
+                postprocessor_kwargs=self._merge_postprocessor_kwargs(
+                    postprocessor_kwargs,
+                    kwargs,
+                ),
             )
         raise ValueError(f"Unsupported writer: {self.writer}")
+
+    @staticmethod
+    def _merge_postprocessor_kwargs(
+        postprocessor_kwargs: Mapping[str, Any] | None,
+        overrides: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        merged = dict(postprocessor_kwargs.items()) if postprocessor_kwargs is not None else {}
+        merged.update(overrides)
+        return merged
 
     def _metadata_raw(
         self,
@@ -562,15 +581,15 @@ class Source:
 
     def _apply_postprocessor(
         self,
-        value: Any,
+        data: Any,
         metadata: Metadata,
         *,
         postprocessor_kwargs: Mapping[str, Any] | None,
     ) -> Any:
         if self.postprocessor is None:
-            return value
+            return data
         kwargs = dict(postprocessor_kwargs.items()) if postprocessor_kwargs is not None else {}
-        return self.postprocessor(value, metadata, **kwargs)
+        return self.postprocessor(metadata, data, **kwargs)
 
     @staticmethod
     def _series_to_frame(value: Any) -> Any:
