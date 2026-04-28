@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "monthpack"
-version = "0.1.3"
+version = "0.1.4"
 description = "Python library for storing and working with monthly-period data."
 readme = "README.md"
 requires-python = ">=3.11"

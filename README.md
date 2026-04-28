@@ -27,7 +27,7 @@ monthpack/
 from monthpack import Source
 
 source = Source.from_path("data/source/source.config.json")
-metadata = source.resolve_metadata(202401, storage=0)
+metadata = source.resolve_metastate(202401, storage=0)
 
 print(metadata.period)
 print(metadata.year)
@@ -227,9 +227,9 @@ current execution directory and normalized to absolute paths. Strings starting
 with `|` are resolved relative to the JSON file directory. You can also pass
 `admin_user` and `preprocessors` directly to the same constructor.
 
-`Source.resolve_metadata(...)` returns a `Metadata` object. Resolved keys are available both as attributes and as dictionary-style accessors, so user preprocessors can use either `metadata.inpath` or `metadata["inpath"]`. The period itself is exposed as `metadata.period`, not as `metadata["period"]`.
+`Source.resolve_metastate(...)` returns a `Metadata` object. Resolved keys are available both as attributes and as dictionary-style accessors, so user preprocessors can use either `metadata.inpath` or `metadata["inpath"]`. The period itself is exposed as `metadata.period`, not as `metadata["period"]`.
 
-When `period=None`, `resolve_metadata(...)` returns only the base metadata,
+When `period=None`, `resolve_metastate(...)` returns only the base metadata,
 without applying any `periodic` or `temporary` entries.
 
 Storage references can be passed either as:

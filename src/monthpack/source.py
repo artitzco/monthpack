@@ -139,21 +139,21 @@ class Source:
             preprocessors=list(preprocessors) if preprocessors is not None else [],
         )
 
-    def resolve_metadata(
+    def resolve_metastate(
         self,
         period: int | None = None,
         storage: StorageRef | None = None,
         verbose: bool = True,
     ) -> Metadata:
-        """Resolve metadata for a period and optional storage override."""
-        return self._resolve_metadata_values(
+        """Resolve metastate for a period and optional storage override."""
+        return self._resolve_metastate_values(
             period,
             verbose=verbose,
             include_temporary=True,
             storage=storage,
         )
 
-    def _resolve_metadata_values(
+    def _resolve_metastate_values(
         self,
         period: int | None,
         *,
@@ -161,8 +161,9 @@ class Source:
         include_temporary: bool,
         storage: StorageRef | None,
         resolve_inpaths: bool = True,
+        resolve_outpaths: bool = True,
     ) -> Metadata:
-        """Internal metadata resolution with optional temporary and inpath control."""
+        """Internal metadata resolution with optional temporary and path control."""
         resolved_period = period if period is not None else None
         resolved = self._metadata_raw(
             self._metadata_entries(storage),
@@ -170,11 +171,11 @@ class Source:
             include_temporary=include_temporary,
         )
         rendered = self._render_templates(resolved, period=resolved_period, storage=storage)
-        values = (
-            self._resolve_inpaths(rendered, verbose=verbose)
-            if resolve_inpaths
-            else dict(rendered.items())
-        )
+        values = dict(rendered.items())
+        if resolve_inpaths:
+            values = self._resolve_inpaths(values, verbose=verbose)
+        if resolve_outpaths:
+            values = self._resolve_outpaths(values)
         return Metadata(resolved_period, values)
 
     def set_preprocessors(
@@ -200,7 +201,7 @@ class Source:
         effective_period = self._effective_period(period, storage_item, storage=storage)
         if period is not None and effective_period is None:
             raise FileNotFoundError(f"No periodic anchor found for: {period}")
-        metadata = self._resolve_metadata_values(
+        metadata = self._resolve_metastate_values(
             effective_period,
             verbose=verbose,
             include_temporary=not self._is_storage_persistent(storage_item),
@@ -290,7 +291,7 @@ class Source:
                 verbose=verbose,
             )
 
-        metadata = self._resolve_metadata_values(
+        metadata = self._resolve_metastate_values(
             effective_period,
             verbose=verbose,
             include_temporary=not self._is_storage_persistent(storage_item),
@@ -301,7 +302,7 @@ class Source:
         source_path = self._output_path(metadata.outpath)
         should_build = (reload or not source_path.exists()) and self.admin_user
         if should_build:
-            metadata = self._resolve_metadata_values(
+            metadata = self._resolve_metastate_values(
                 effective_period,
                 verbose=verbose,
                 include_temporary=not self._is_storage_persistent(storage_item),
@@ -445,6 +446,13 @@ class Source:
         for key, value in metadata.items():
             if key.endswith("inpath") and isinstance(value, str):
                 resolved[key] = self._resolve_inpath(key, value, verbose=verbose)
+        return resolved
+
+    def _resolve_outpaths(self, metadata: Mapping[str, Any]) -> dict[str, Any]:
+        resolved = dict(metadata.items())
+        for key, value in metadata.items():
+            if key.endswith("outpath") and isinstance(value, str):
+                resolved[key] = self._output_path(value)
         return resolved
 
     @staticmethod
