@@ -20,6 +20,7 @@ def write_dataframe_config(path: str | Path) -> Path:
         "collection": "concat",
         "concat_axis": 0,
         "period_label": "period",
+        "period_as_index": False,
         "metadata": [
             {
                 "inpath": "**/{period}_*.csv",
@@ -42,6 +43,7 @@ def write_series_config(path: str | Path) -> Path:
         "persistence": False,
         "collection": "concat",
         "period_label": "period",
+        "period_as_index": False,
         "metadata": [
             {
                 "inpath": "**/{period}_*.csv",

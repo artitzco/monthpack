@@ -95,6 +95,7 @@ class Source:
     collection: str = "list"
     concat_axis: int = 0
     period_label: str | None = None
+    period_as_index: bool = False
     name: str | None = None
     input: Path | None = None
     output: Path | None = None
@@ -149,6 +150,7 @@ class Source:
                 if payload.get("period_label") is not None
                 else None
             ),
+            period_as_index=bool(payload.get("period_as_index", False)),
             name=(
                 str(payload["name"])
                 if payload.get("name") is not None
@@ -501,14 +503,30 @@ class Source:
         for period, value in zip(periods, values, strict=False):
             if value is None or not isinstance(value, pd.DataFrame):
                 if value is not None and isinstance(value, pd.Series):
-                    updated_values.append(
-                        pd.concat({period: value}, names=[str(self.period_label)])
-                    )
+                    if self.period_as_index:
+                        period_index = pd.Index(
+                            [period] * len(value),
+                            name=str(self.period_label),
+                        )
+                        updated_values.append(
+                            pd.Series(
+                                value.to_numpy(),
+                                index=period_index,
+                                name=value.name,
+                            )
+                        )
+                    else:
+                        updated_values.append(
+                            pd.concat({period: value}, names=[str(self.period_label)])
+                        )
                 else:
                     updated_values.append(value)
                 continue
             frame = value.copy()
-            frame[str(self.period_label)] = period
+            if self.period_as_index:
+                frame.index = pd.Index([period] * len(frame), name=str(self.period_label))
+            else:
+                frame[str(self.period_label)] = period
             updated_values.append(frame)
         return updated_values
 

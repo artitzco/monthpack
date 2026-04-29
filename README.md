@@ -106,6 +106,7 @@ Field overview:
 - `collection`: one of `list`, `dict`, or `concat`.
 - `concat_axis`: axis for `concat` collection.
 - `period_label`: optional label for period annotation in pandas collections.
+- `period_as_index`: optional (`false` by default). When `true` and `period_label` is set, period labeling replaces the existing index in pandas outputs instead of adding a column (DataFrame) or an outer MultiIndex level (Series).
 - `persistence`: when `true`, periodic metadata rules behave as persistence anchors.
 - `metadata`: unified global metadata rules (base, periodic, and temporary).
 - `input`/`output`: optional paths.
