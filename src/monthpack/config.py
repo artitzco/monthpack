@@ -17,6 +17,7 @@ def write_dataframe_config(path: str | Path) -> Path:
         "writer": "pandas",
         "pandas_type": "dataframe",
         "persistence": False,
+        "min_period": None,
         "collection": "concat",
         "concat_axis": 0,
         "period_label": "period",
@@ -41,6 +42,7 @@ def write_series_config(path: str | Path) -> Path:
         "writer": "pandas",
         "pandas_type": "series",
         "persistence": False,
+        "min_period": None,
         "collection": "concat",
         "period_label": "period",
         "period_as_index": False,
@@ -63,6 +65,7 @@ def write_pickle_config(path: str | Path) -> Path:
         "output": "|output",
         "writer": "pickle",
         "persistence": False,
+        "min_period": None,
         "collection": "list",
         "metadata": [
             {

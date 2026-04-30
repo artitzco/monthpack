@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from bisect import bisect_right
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -92,6 +91,7 @@ class Source:
     metadata: tuple[dict[str, Any], ...]
     pandas_type: str | None = None
     persistence: bool = False
+    min_period: int | None = None
     collection: str = "list"
     concat_axis: int = 0
     period_label: str | None = None
@@ -143,6 +143,7 @@ class Source:
                 else None
             ),
             persistence=bool(payload.get("persistence", False)),
+            min_period=payload.get("min_period"),
             collection=str(payload.get("collection", "list")),
             concat_axis=int(payload.get("concat_axis", 0)),
             period_label=(
@@ -211,30 +212,43 @@ class Source:
         """Switch back to admin mode."""
         self.admin_user = True
 
-    def save(self, period: int | None, verbose: bool = True) -> Path:
+    def save(self, period: int | None, verbose: bool = True) -> Path | None:
         """Build and save processed data for one period."""
         if not self.admin_user:
             raise PermissionError("save is not available in user mode")
 
-        effective_period = self._effective_period(period)
-        if period is not None and effective_period is None:
-            raise FileNotFoundError(f"No periodic anchor found for: {period}")
-
         metadata = self._resolve_metastate_values(
-            effective_period,
+            period,
             verbose=verbose,
             include_temporary=not self.persistence,
+            resolve_inpaths=not self.persistence or period is None,
         )
+        if self.persistence and period is not None:
+            return self._save_persistent(metadata, verbose=verbose)
         return self._save_one(metadata)
 
-    def _save_one(self, metadata: Metadata) -> Path:
+    def _save_one(self, metadata: Metadata) -> Path | None:
         """Save one processed artifact using already-resolved metadata."""
-        import pandas as pd
+        value = self._preprocess(metadata)
+        if value is None:
+            return None
+        return self._write_value(value, metadata)
 
+    def _save_persistent(self, target_metadata: Metadata, *, verbose: bool) -> Path | None:
+        """Save the requested period using the nearest prior valid preprocessor result."""
+        value = self._persistent_value(target_metadata.period, verbose=verbose)
+        if value is None:
+            return None
+        return self._write_value(value, target_metadata)
+
+    def _preprocess(self, metadata: Metadata) -> Any:
         if self.preprocessor is None:
             raise ValueError("preprocessor is not defined for this source")
+        return self.preprocessor(metadata)
 
-        value = self.preprocessor(metadata)
+    def _write_value(self, value: Any, metadata: Metadata) -> Path:
+        import pandas as pd
+
         destination = self._output_path(metadata.outpath)
         destination.parent.mkdir(parents=True, exist_ok=True)
 
@@ -303,16 +317,8 @@ class Source:
         """Read one processed artifact and rebuild it first when needed."""
         import pandas as pd
 
-        effective_period = self._effective_period(period)
-        if period is not None and effective_period is None:
-            return self._missing_read(
-                f"No periodic anchor found for: {period}",
-                skip_error=skip_error,
-                verbose=verbose,
-            )
-
         metadata = self._resolve_metastate_values(
-            effective_period,
+            period,
             verbose=verbose,
             include_temporary=not self.persistence,
             resolve_inpaths=False,
@@ -320,12 +326,8 @@ class Source:
         source_path = self._output_path(metadata.outpath)
         should_build = (reload or not source_path.exists()) and self.admin_user
         if should_build:
-            metadata = self._resolve_metastate_values(
-                effective_period,
-                verbose=verbose,
-                include_temporary=not self.persistence,
-            )
-            self._save_one(metadata)
+            if self.save(period, verbose=verbose) is None:
+                return None
 
         if not source_path.exists():
             return self._missing_read(
@@ -404,15 +406,6 @@ class Source:
             resolved.update(self._metadata_payload(entry))
         return resolved
 
-    def _periodic_periods(self) -> list[int]:
-        return sorted(
-            {
-                int(entry["period"])
-                for entry in self.metadata
-                if _is_period_rule(entry) and not _is_temporary(entry)
-            }
-        )
-
     def _metadata_payload(self, entry: Mapping[str, Any]) -> dict[str, Any]:
         return {
             key: value
@@ -420,22 +413,60 @@ class Source:
             if key not in {"period", "temporary"}
         }
 
-    def _effective_period(self, period: int | None) -> int | None:
-        if not self.persistence:
-            return period
-        if period is None:
-            return None
-
-        periodic_periods = self._periodic_periods()
-        index = bisect_right(periodic_periods, period) - 1
-        if index < 0:
-            return None
-        return periodic_periods[index]
-
     def _read_cache_key(self, period: int | None) -> tuple[str, int | None]:
-        if self.persistence:
-            return ("anchor", self._effective_period(period))
         return ("period", period)
+
+    def _persistent_value(self, period: int, *, verbose: bool) -> Any | None:
+        min_period = self._min_period()
+        if min_period is None:
+            self._warn(
+                f"No min_period defined for persistent source: {period}",
+                verbose=verbose,
+            )
+            return None
+        if period < min_period:
+            self._warn(
+                f"No persistent data found for: {period} before min_period: {min_period}",
+                verbose=verbose,
+            )
+            return None
+
+        for candidate_period in self._periods_back_to(period, min_period):
+            metadata = self._resolve_metastate_values(
+                candidate_period,
+                verbose=False,
+                include_temporary=False,
+            )
+            value = self._preprocess(metadata)
+            if value is not None:
+                return value
+
+        self._warn(
+            f"No persistent data found for: {period} down to min_period: {min_period}",
+            verbose=verbose,
+        )
+        return None
+
+    def _min_period(self) -> int | None:
+        if self.min_period is None:
+            return None
+        if not isinstance(self.min_period, int):
+            raise TypeError("min_period must be an integer YYYYMM value or None")
+        return self.min_period
+
+    def _warn(self, message: str, *, verbose: bool) -> None:
+        if verbose and self.admin_user:
+            print(f"[monthpack] {message}")
+
+    def _periods_back_to(self, start: int, end: int) -> list[int]:
+        periods = [start]
+        current = start
+        while current != end:
+            current = self._advance_period(current, -1)
+            if current < end:
+                break
+            periods.append(current)
+        return periods
 
     def _output_path(self, outpath: Any) -> Path:
         path = Path(str(outpath))

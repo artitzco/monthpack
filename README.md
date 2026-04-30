@@ -83,6 +83,7 @@ A config is now flat (no `storage` container):
     "concat_axis": 0,
     "period_label": "period",
     "persistence": true,
+    "min_period": 202401,
     "metadata": [
         {
             "inpath": "**/{period}_*.csv",
@@ -107,7 +108,8 @@ Field overview:
 - `concat_axis`: axis for `concat` collection.
 - `period_label`: optional label for period annotation in pandas collections.
 - `period_as_index`: optional (`false` by default). When `true` and `period_label` is set, period labeling replaces the existing index in pandas outputs instead of adding a column (DataFrame) or an outer MultiIndex level (Series).
-- `persistence`: when `true`, periodic metadata rules behave as persistence anchors.
+- `persistence`: when `true`, missing input data for a requested period is resolved by probing earlier periods with the registered preprocessor until it returns a non-null value.
+- `min_period`: lower bound for persistent backward probing. It defaults to `null`; persistent sources should set an explicit integer `YYYYMM` value.
 - `metadata`: unified global metadata rules (base, periodic, and temporary).
 - `input`/`output`: optional paths.
 
@@ -125,7 +127,9 @@ Metadata rule behavior:
 - `source.read((start, end), ...)` expands an inclusive monthly range.
 - `source.read_one(period, ...)` is the single-period helper used internally.
 
-`skip_error=True` returns `None` for missing-read cases such as a missing processed file or persistence anchor. With `skip_error=False`, those cases raise `FileNotFoundError`.
+`skip_error=True` returns `None` for missing-read cases such as a missing processed file. With `skip_error=False`, those cases raise `FileNotFoundError`. Missing persistent input returns `None` after a single admin-mode warning when `verbose=True`.
+
+With `persistence=true`, each requested period is saved independently. If `source.read(202503)` is requested and the preprocessor returns `None` for 202503 and 202502 but returns data for 202501, that data is saved to the 202503 output path. Later reads of 202503 use the processed 202503 file unless `reload=True` is passed.
 
 ## User Mode
 
