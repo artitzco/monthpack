@@ -52,7 +52,7 @@ source.set_preprocessor(preprocess_main)
 source.set_postprocessor(postprocess_main)
 ```
 
-`postprocessor_kwargs` are passed to the postprocessor during `read(...)` and `read_one(...)`.
+`reserved_kwargs` (as well as dynamic `**kwargs` acting as overrides) are passed to the postprocessor during `read(...)` and `read_one(...)`.
 
 ## Config Writers
 
@@ -77,12 +77,12 @@ A config is now flat (no `storage` container):
     "name": "main",
     "input": "|input",
     "output": "|output",
-    "writer": "pandas",
-    "pandas_type": "dataframe",
+    "format": "dataframe",
     "collection": "concat",
     "concat_axis": 0,
     "period_label": "period",
     "persistence": true,
+    "static": false,
     "min_period": 202401,
     "metadata": [
         {
@@ -102,13 +102,13 @@ A config is now flat (no `storage` container):
 Field overview:
 
 - `name`: optional, used for template interpolation (`{name}`).
-- `writer`: supports `pandas` and `pickle`.
-- `pandas_type`: required when `writer = "pandas"`; use `dataframe` or `series`.
+- `format`: one of `dataframe`, `series`, or `pickle`.
 - `collection`: one of `list`, `dict`, or `concat`.
 - `concat_axis`: axis for `concat` collection.
 - `period_label`: optional label for period annotation in pandas collections.
 - `period_as_index`: optional (`false` by default). When `true` and `period_label` is set, period labeling replaces the existing index in pandas outputs instead of adding a column (DataFrame) or an outer MultiIndex level (Series).
 - `persistence`: when `true`, missing input data for a requested period is resolved by probing earlier periods with the registered preprocessor until it returns a non-null value.
+- `static`: when `true`, the source is treated as atemporal. Calling `read` with a specific period will raise a `ValueError`.
 - `min_period`: lower bound for persistent backward probing. It defaults to `null`; persistent sources should set an explicit integer `YYYYMM` value.
 - `metadata`: unified global metadata rules (base, periodic, and temporary).
 - `input`/`output`: optional paths.
@@ -142,7 +142,6 @@ In user mode:
 
 - `read(...)` only returns already processed data.
 - missing processed files are not regenerated from raw inputs.
-- `save(...)` is not available.
 
 ## Metadata Module
 
@@ -170,4 +169,55 @@ print(current.month)
 
 ## Period Module
 
-`monthpack` also includes an independent `Period` class for monthly values represented as `YYYYMM`.
+`monthpack` also includes an independent `Period` class for monthly values represented as `YYYYMM`:
+
+```python
+from monthpack import Period
+
+period = Period(202401)
+print(period.year)   # 2024
+print(period.month)  # 1
+print(str(period))   # "202401"
+```
+
+## Fluent Reader Interface (SourceReader)
+
+`SourceReader` provides a subscriptable and callable interface designed to make reading data sources expressive and readable. 
+
+You can create a `SourceReader` from a source, pre-configuring default keyword arguments for the postprocessor:
+
+```python
+# Create a reader with pre-configured postprocessor kwargs
+reader = source.as_reader(filtro="activo", umbral=10)
+
+# 1. Callable access (behaves exactly like source.read):
+data = reader(202401)
+
+# You can pass runtime overrides and bypass reserved words via reserved_kwargs:
+data = reader(202401, filtro="inactivo", reserved_kwargs={"reload": True})
+
+# 2. Subscriptable access (reads a single period):
+data = reader[202401]
+
+# 3. Slice range access (reads an inclusive monthly range):
+data = reader[202401:202406]
+```
+
+## Source Central Registry (SourceManager)
+
+`SourceManager` provides a centralized registry to manage and read multiple sources:
+
+```python
+from monthpack import SourceManager
+
+manager = SourceManager()
+
+# Batch register one or more sources
+manager.add_source(source_sales, source_finance)
+
+# Access sources by name or insertion index
+sales = manager["sales"]
+
+# Proxy reads transparently
+data = manager.read("sales", (202401, 202406), reserved_kwargs={"filtro": "activo"})
+```

@@ -148,6 +148,9 @@ class Period:
     def __str__(self) -> str:
         return f"{self.value:06d}"
 
+    def __repr__(self) -> str:
+        return f"Period({self.value})"
+
     def __add__(self, other: int) -> Period:
         if not isinstance(other, int):
             return NotImplemented

@@ -14,13 +14,14 @@ class SourceManager:
     def __init__(self) -> None:
         self._sources: list[Source] = []
 
-    def add_source(self, source: Source) -> SourceManager:
-        """Register one source and return the same manager instance."""
-        if source.name is not None and any(
-            existing.name == source.name for existing in self._sources
-        ):
-            raise ValueError(f"Source name already registered: {source.name}")
-        self._sources.append(source)
+    def add_source(self, *sources: Source) -> SourceManager:
+        """Register one or more sources and return the same manager instance."""
+        for source in sources:
+            if source.name is not None and any(
+                existing.name == source.name for existing in self._sources
+            ):
+                raise ValueError(f"Source name already registered: {source.name}")
+            self._sources.append(source)
         return self
 
     def get_source(self, identifier: str | int) -> Source:
@@ -55,7 +56,7 @@ class SourceManager:
         reload: bool = False,
         skip_error: bool = True,
         verbose: bool = True,
-        postprocessor_kwargs=None,
+        reserved_kwargs=None,
         **kwargs: Any,
     ):
         """Proxy source reads by identifier."""
@@ -65,7 +66,7 @@ class SourceManager:
             reload=reload,
             skip_error=skip_error,
             verbose=verbose,
-            postprocessor_kwargs=postprocessor_kwargs,
+            reserved_kwargs=reserved_kwargs,
             **kwargs,
         )
 

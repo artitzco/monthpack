@@ -87,10 +87,10 @@ class _Period:
 class Source:
     """Represents one configured source with a single implicit storage setup."""
 
-    writer: str
+    format: str
     metadata: tuple[dict[str, Any], ...]
-    pandas_type: str | None = None
     persistence: bool = False
+    static: bool = False
     min_period: int | None = None
     collection: str = "list"
     concat_axis: int = 0
@@ -102,6 +102,17 @@ class Source:
     preprocessor: Preprocessor | None = None
     postprocessor: Postprocessor | None = None
     admin_user: bool = True
+
+    def __str__(self) -> str:
+        name = self.name if self.name is not None else "<unnamed>"
+        return f"Source(name={name}, format={self.format})"
+
+    def __repr__(self) -> str:
+        name = self.name if self.name is not None else "<unnamed>"
+        return (
+            f"Source(name={name!r}, format={self.format!r}, "
+            f"persistence={self.persistence}, static={self.static})"
+        )
 
     @classmethod
     def from_path(
@@ -135,14 +146,10 @@ class Source:
             output_path = cls._resolve_directory(raw_output, config_root)
 
         return cls(
-            writer=str(payload["writer"]),
+            format=str(payload["format"]),
             metadata=metadata_data,
-            pandas_type=(
-                str(payload["pandas_type"])
-                if payload.get("pandas_type") is not None
-                else None
-            ),
             persistence=bool(payload.get("persistence", False)),
+            static=bool(payload.get("static", False)),
             min_period=payload.get("min_period"),
             collection=str(payload.get("collection", "list")),
             concat_axis=int(payload.get("concat_axis", 0)),
@@ -212,10 +219,17 @@ class Source:
         """Switch back to admin mode."""
         self.admin_user = True
 
-    def save(self, period: int | None, verbose: bool = True) -> Path | None:
+    def as_reader(
+        self,
+        **kwargs: Any,
+    ) -> SourceReader:
+        """Create a fluent read-only SourceReader interface bound to this source."""
+        return SourceReader(self, **kwargs)
+
+    def _save(self, period: int | None, verbose: bool = True) -> Path | None:
         """Build and save processed data for one period."""
         if not self.admin_user:
-            raise PermissionError("save is not available in user mode")
+            raise PermissionError("implicit save is not available in user mode")
 
         metadata = self._resolve_metastate_values(
             period,
@@ -252,19 +266,16 @@ class Source:
         destination = self._output_path(metadata.outpath)
         destination.parent.mkdir(parents=True, exist_ok=True)
 
-        if self.writer == "pandas":
-            if self.pandas_type == "dataframe":
-                value.to_feather(destination)
-            elif self.pandas_type == "series":
-                if not isinstance(value, pd.Series):
-                    raise ValueError("pandas_type 'series' requires a pandas Series preprocessor result")
-                self._series_to_frame(value).to_feather(destination)
-            else:
-                raise ValueError(f"Unsupported pandas_type: {self.pandas_type}")
-        elif self.writer == "pickle":
+        if self.format == "dataframe":
+            value.to_feather(destination)
+        elif self.format == "series":
+            if not isinstance(value, pd.Series):
+                raise ValueError("format 'series' requires a pandas Series preprocessor result")
+            self._series_to_frame(value).to_feather(destination)
+        elif self.format == "pickle":
             value.to_pickle(destination)
         else:
-            raise ValueError(f"Unsupported writer: {self.writer}")
+            raise ValueError(f"Unsupported format: {self.format}")
         return destination
 
     def read(
@@ -273,7 +284,7 @@ class Source:
         reload: bool = False,
         skip_error: bool = True,
         verbose: bool = True,
-        postprocessor_kwargs: Mapping[str, Any] | None = None,
+        reserved_kwargs: Mapping[str, Any] | None = None,
         **kwargs: Any,
     ) -> Any | None:
         """Read one period or a collection of periods."""
@@ -284,7 +295,7 @@ class Source:
                 reload=reload,
                 skip_error=skip_error,
                 verbose=verbose,
-                postprocessor_kwargs=postprocessor_kwargs,
+                reserved_kwargs=reserved_kwargs,
                 **kwargs,
             )
 
@@ -298,7 +309,7 @@ class Source:
                     reload=reload,
                     skip_error=skip_error,
                     verbose=verbose,
-                    postprocessor_kwargs=postprocessor_kwargs,
+                    reserved_kwargs=reserved_kwargs,
                     **kwargs,
                 )
             values.append(cache[cache_key])
@@ -311,10 +322,13 @@ class Source:
         reload: bool = False,
         skip_error: bool = True,
         verbose: bool = True,
-        postprocessor_kwargs: Mapping[str, Any] | None = None,
+        reserved_kwargs: Mapping[str, Any] | None = None,
         **kwargs: Any,
     ) -> Any | None:
         """Read one processed artifact and rebuild it first when needed."""
+        if self.static and period is not None:
+            raise ValueError("This source is static and does not accept a period. Use read(None) instead.")
+
         import pandas as pd
 
         metadata = self._resolve_metastate_values(
@@ -326,7 +340,7 @@ class Source:
         source_path = self._output_path(metadata.outpath)
         should_build = (reload or not source_path.exists()) and self.admin_user
         if should_build:
-            if self.save(period, verbose=verbose) is None:
+            if self._save(period, verbose=verbose) is None:
                 return None
 
         if not source_path.exists():
@@ -336,35 +350,35 @@ class Source:
                 verbose=verbose,
             )
 
-        if self.writer == "pandas":
+        if self.format in ("dataframe", "series"):
             frame = pd.read_feather(source_path)
             value = self._pandas_value(frame)
             return self._apply_postprocessor(
                 value,
                 metadata,
-                postprocessor_kwargs=self._merge_postprocessor_kwargs(
-                    postprocessor_kwargs,
+                reserved_kwargs=self._merge_reserved_kwargs(
+                    reserved_kwargs,
                     kwargs,
                 ),
             )
-        if self.writer == "pickle":
+        if self.format == "pickle":
             value = pd.read_pickle(source_path)
             return self._apply_postprocessor(
                 value,
                 metadata,
-                postprocessor_kwargs=self._merge_postprocessor_kwargs(
-                    postprocessor_kwargs,
+                reserved_kwargs=self._merge_reserved_kwargs(
+                    reserved_kwargs,
                     kwargs,
                 ),
             )
-        raise ValueError(f"Unsupported writer: {self.writer}")
+        raise ValueError(f"Unsupported format: {self.format}")
 
     @staticmethod
-    def _merge_postprocessor_kwargs(
-        postprocessor_kwargs: Mapping[str, Any] | None,
+    def _merge_reserved_kwargs(
+        reserved_kwargs: Mapping[str, Any] | None,
         overrides: Mapping[str, Any],
     ) -> dict[str, Any]:
-        merged = dict(postprocessor_kwargs.items()) if postprocessor_kwargs is not None else {}
+        merged = dict(reserved_kwargs.items()) if reserved_kwargs is not None else {}
         merged.update(overrides)
         return merged
 
@@ -525,7 +539,7 @@ class Source:
         periods: list[int],
         values: list[Any | None],
     ) -> list[Any | None]:
-        if self.period_label is None or self.writer != "pandas":
+        if self.period_label is None or self.format not in ("dataframe", "series"):
             return values
 
         import pandas as pd
@@ -633,11 +647,11 @@ class Source:
         data: Any,
         metadata: Metadata,
         *,
-        postprocessor_kwargs: Mapping[str, Any] | None,
+        reserved_kwargs: Mapping[str, Any] | None,
     ) -> Any:
         if self.postprocessor is None:
             return data
-        kwargs = dict(postprocessor_kwargs.items()) if postprocessor_kwargs is not None else {}
+        kwargs = dict(reserved_kwargs.items()) if reserved_kwargs is not None else {}
         return self.postprocessor(metadata, data, **kwargs)
 
     @staticmethod
@@ -650,11 +664,11 @@ class Source:
         return value.rename(value_name).reset_index()
 
     def _pandas_value(self, frame: Any) -> Any:
-        if self.pandas_type == "dataframe":
+        if self.format == "dataframe":
             return frame
-        if self.pandas_type == "series":
+        if self.format == "series":
             return Source._frame_to_series(frame)
-        raise ValueError(f"Unsupported pandas_type: {self.pandas_type}")
+        raise ValueError(f"Unsupported format: {self.format}")
 
     @staticmethod
     def _frame_to_series(frame: Any) -> Any:
@@ -719,3 +733,64 @@ class Source:
             return template
         render_context = {name: context[name] for name in root_names}
         return template.format(**render_context)
+
+
+class SourceReader:
+    """Fluent read-only interface for consuming Source data."""
+
+    def __init__(
+        self,
+        source: Source,
+        **kwargs: Any,
+    ) -> None:
+        self._source = source
+        self._default_kwargs = kwargs
+
+    @property
+    def source(self) -> Source:
+        """The underlying source instance."""
+        return self._source
+
+    @property
+    def default_kwargs(self) -> dict[str, Any]:
+        """The default kwargs applied to the source's postprocessor."""
+        return dict(self._default_kwargs)
+
+    def __str__(self) -> str:
+        return f"SourceReader(source={self._source}, default_kwargs={self._default_kwargs})"
+
+    def __repr__(self) -> str:
+        return f"SourceReader(source={self._source!r}, default_kwargs={self._default_kwargs})"
+
+    def __call__(
+        self,
+        periods: int | None | list[int] | tuple[int, int] = None,
+        reload: bool = False,
+        skip_error: bool = True,
+        verbose: bool = True,
+        reserved_kwargs: Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> Any | None:
+        """Call the underlying source's read method with default and call-time kwargs merged."""
+        merged_post = self._default_kwargs
+        if reserved_kwargs:
+            merged_post = {**merged_post, **reserved_kwargs}
+
+        return self._source.read(
+            periods,
+            reload=reload,
+            skip_error=skip_error,
+            verbose=verbose,
+            reserved_kwargs=merged_post,
+            **kwargs,
+        )
+
+    def __getitem__(self, key: Any) -> Any | None:
+        """Subscript the reader to read a single period or a range of periods (slices)."""
+        if isinstance(key, slice):
+            if key.step is not None:
+                raise ValueError("Slice step is not supported for periods")
+            if key.start is None or key.stop is None:
+                raise ValueError("Open-ended slices are not supported for periods")
+            return self.__call__((key.start, key.stop))
+        return self.__call__(key)

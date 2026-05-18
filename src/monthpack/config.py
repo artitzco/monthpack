@@ -11,12 +11,12 @@ from typing import Mapping
 def write_dataframe_config(path: str | Path) -> Path:
     """Write a starter config for a pandas DataFrame workflow."""
     payload: dict[str, Any] = {
-        "name": "dataframe",
+        "name": "dataframe_name",
         "input": "|input",
         "output": "|output",
-        "writer": "pandas",
-        "pandas_type": "dataframe",
+        "format": "dataframe",
         "persistence": False,
+        "static": False,
         "min_period": None,
         "collection": "concat",
         "concat_axis": 0,
@@ -36,12 +36,12 @@ def write_dataframe_config(path: str | Path) -> Path:
 def write_series_config(path: str | Path) -> Path:
     """Write a starter config for a pandas Series workflow."""
     payload: dict[str, Any] = {
-        "name": "series",
+        "name": "series_name",
         "input": "|input",
         "output": "|output",
-        "writer": "pandas",
-        "pandas_type": "series",
+        "format": "series",
         "persistence": False,
+        "static": False,
         "min_period": None,
         "collection": "concat",
         "period_label": "period",
@@ -60,11 +60,12 @@ def write_series_config(path: str | Path) -> Path:
 def write_pickle_config(path: str | Path) -> Path:
     """Write a starter config for a pickle workflow."""
     payload: dict[str, Any] = {
-        "name": "pickle",
+        "name": "pickle_name",
         "input": "|input",
         "output": "|output",
-        "writer": "pickle",
+        "format": "pickle",
         "persistence": False,
+        "static": False,
         "min_period": None,
         "collection": "list",
         "metadata": [
